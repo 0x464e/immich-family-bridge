@@ -1,0 +1,9 @@
+FROM alpine:3.22
+
+RUN addgroup -g 1000 familybridge && adduser -D -H -u 1000 -G familybridge familybridge
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/familybridge /usr/local/bin/familybridge
+
+USER familybridge
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/familybridge"]
