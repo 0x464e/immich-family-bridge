@@ -14,26 +14,12 @@ builds:
     targets:
       - linux_amd64
       - linux_arm64
-      - linux_arm_6
-      - linux_arm_7
-      - darwin_amd64
-      - darwin_arm64
-      - windows_amd64
-      - freebsd_amd64
-      - freebsd_arm64
 
-archives:
-  - formats: ["tar.gz"]
-    name_template: >-
-      {{ .ProjectName }}_
-      {{- title .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
-    format_overrides:
-      - goos: windows
-        formats: [zip]
+checksum:
+  disable: true
+
+docker_digest:
+  disable: true
 
 dockers_v2:
   - id: familybridge-docker
@@ -61,4 +47,3 @@ release:
     owner: 0x464e
     name: immich-family-bridge
   mode: keep-existing
-  include_meta: true
