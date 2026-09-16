@@ -1,0 +1,1 @@
+CREATE TABLE asset_replica_files(logical_asset_id TEXT NOT NULL, member_id TEXT NOT NULL, component_kind TEXT NOT NULL, source_path TEXT NOT NULL, recipient_path TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(logical_asset_id,member_id,component_kind), FOREIGN KEY(logical_asset_id,member_id) REFERENCES asset_replicas(logical_asset_id,member_id));

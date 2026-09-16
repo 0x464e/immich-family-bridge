@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: familybridge-build
+    env:
+      - CGO_ENABLED=0
+    main: ./cmd/familybridge
+    binary: familybridge
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - linux_arm_6
+      - linux_arm_7
+      - darwin_amd64
+      - darwin_arm64
+      - windows_amd64
+      - freebsd_amd64
+      - freebsd_arm64
+
+archives:
+  - formats: ["tar.gz"]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+dockers_v2:
+  - id: familybridge-docker
+    dockerfile: Dockerfile.goreleaser
+    ids:
+      - familybridge-build
+    images:
+      - 0x464e/immich-family-bridge
+    tags:
+      - "{{ .Version }}"
+      - latest
+    labels:
+      "org.opencontainers.image.description": "Immich Family Bridge reconciliation service"
+      "org.opencontainers.image.created": "{{ .Date }}"
+      "org.opencontainers.image.name": "{{ .ProjectName }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.source": "{{ .GitURL }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+release:
+  github:
+    owner: 0x464e
+    name: immich-family-bridge
+  mode: keep-existing
+  include_meta: true

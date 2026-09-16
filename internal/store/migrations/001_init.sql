@@ -1,0 +1,10 @@
+CREATE TABLE families(id TEXT PRIMARY KEY);
+CREATE TABLE members(id TEXT PRIMARY KEY, family_id TEXT NOT NULL REFERENCES families(id), user_id TEXT NOT NULL UNIQUE, library_id TEXT NOT NULL UNIQUE);
+CREATE TABLE logical_assets(id TEXT PRIMARY KEY, family_id TEXT NOT NULL REFERENCES families(id), origin_member_id TEXT NOT NULL REFERENCES members(id), origin_immich_asset_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+CREATE TABLE asset_replicas(logical_asset_id TEXT NOT NULL REFERENCES logical_assets(id), member_id TEXT NOT NULL REFERENCES members(id), immich_asset_id TEXT UNIQUE, role TEXT NOT NULL, filesystem_path TEXT, external_library_id TEXT, state TEXT NOT NULL, error TEXT, PRIMARY KEY(logical_asset_id,member_id));
+CREATE TABLE logical_albums(id TEXT PRIMARY KEY, family_id TEXT NOT NULL REFERENCES families(id), name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', cover_logical_asset_id TEXT REFERENCES logical_assets(id), initialized INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE album_replicas(logical_album_id TEXT NOT NULL REFERENCES logical_albums(id), member_id TEXT NOT NULL REFERENCES members(id), immich_album_id TEXT UNIQUE, state TEXT NOT NULL, PRIMARY KEY(logical_album_id,member_id));
+CREATE TABLE album_memberships(logical_album_id TEXT NOT NULL REFERENCES logical_albums(id), logical_asset_id TEXT NOT NULL REFERENCES logical_assets(id), PRIMARY KEY(logical_album_id,logical_asset_id));
+CREATE TABLE sharing_sources(logical_asset_id TEXT NOT NULL REFERENCES logical_assets(id), source_kind TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(logical_asset_id,source_kind,source_id));
+CREATE TABLE album_observations(logical_album_id TEXT NOT NULL REFERENCES logical_albums(id), member_id TEXT NOT NULL REFERENCES members(id), immich_asset_id TEXT NOT NULL, PRIMARY KEY(logical_album_id,member_id,immich_asset_id));
+CREATE TABLE public_link_mappings(logical_album_id TEXT NOT NULL REFERENCES logical_albums(id), shared_link_id TEXT NOT NULL UNIQUE, backing_member_id TEXT NOT NULL REFERENCES members(id), backing_album_replica_id TEXT NOT NULL, PRIMARY KEY(logical_album_id,shared_link_id));

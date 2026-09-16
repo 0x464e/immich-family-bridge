@@ -1,0 +1,22 @@
+services:
+  familybridge:
+    build: .
+    image: immich-family-bridge:local
+    user: "${PUID:-1000}:${PGID:-1000}"
+    read_only: true
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      FAMILYBRIDGE_API_TOKEN: "${FAMILYBRIDGE_API_TOKEN:-local-fixture-token}"
+    volumes:
+      - ./config.example.yaml:/etc/familybridge/config.yaml:ro
+      - ./testdata:/testdata
+      - ./testdata/state:/state
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

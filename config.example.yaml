@@ -1,0 +1,42 @@
+mode: fake
+family_id: demo-family
+immich_url: http://immich-server:2283/api
+# Real mode is disabled. A future setup will provide admin_key_env for library scans.
+source_root: /testdata/source
+bridge_root: /testdata/bridge
+immich_bridge_root: /testdata/bridge
+database: /state/bridge.sqlite
+fake_state: /state/fake.json
+listen: 0.0.0.0:8080
+api_token_env: FAMILYBRIDGE_API_TOKEN
+poll_interval: 30s
+members:
+  - id: alice
+    user_id: fake-user-alice
+    library_id: fake-library-alice
+  - id: bob
+    user_id: fake-user-bob
+    library_id: fake-library-bob
+  - id: carol
+    user_id: fake-user-carol
+    library_id: fake-library-carol
+fake:
+  assets:
+    - id: alice-photo-a
+      member: alice
+      path: /testdata/source/alice/photo-a.jpg
+      type: IMAGE
+    - id: bob-photo-b
+      member: bob
+      path: /testdata/source/bob/photo-b.jpg
+      type: IMAGE
+    - id: carol-photo-c
+      member: carol
+      path: /testdata/source/carol/photo-c.jpg
+      type: IMAGE
+  albums:
+    - id: alice-together
+      member: alice
+      name: Together
+      description: Family media
+      asset_ids: [alice-photo-a]

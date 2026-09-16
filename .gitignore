@@ -1,0 +1,8 @@
+testdata/state/*
+!testdata/state/.gitkeep
+testdata/bridge/*
+!testdata/bridge/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+dist/
