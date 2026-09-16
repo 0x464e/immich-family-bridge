@@ -39,7 +39,7 @@ The initial reconciler skips coupled media forms, such as Live Photos, stacks, a
 
 ## Releases
 
-The repository uses the same release flow as `traefik-opnsense-sync`: conventional commits on `master` feed release-please, which maintains `CHANGELOG.md` and opens a release PR. Its first proposed version is `v0.1.0`. When a GitHub release is created, GoReleaser publishes platform archives and the `0x464e/immich-family-bridge` Docker Hub image with version and `latest` tags.
+The repository uses the same release flow as `traefik-opnsense-sync`: conventional commits on `master` feed release-please, which maintains `CHANGELOG.md` and opens a release PR. Its first proposed version is `v0.1.0`. When a GitHub release is created, GoReleaser publishes only the `0x464e/immich-family-bridge` multi-platform Docker Hub image with version and `latest` tags. Linux amd64 and arm64 binaries are intermediate inputs to the image build; no standalone binaries or archives are attached to the GitHub release.
 
 The GitHub repository must be created and connected later; this local checkout has no remote and nothing has been pushed. Before enabling the workflows on GitHub, configure `ACTIONS_PAT` for release-please and GoReleaser GitHub writes, and `DOCKER_PAT` for the `0x464e` Docker Hub account. The local Compose build continues to use `Dockerfile`; GoReleaser uses `Dockerfile.goreleaser` to package its prebuilt Linux binaries.
 
@@ -47,5 +47,5 @@ Local release validation without publishing:
 
 ```sh
 goreleaser check
-goreleaser release --snapshot --skip=docker --clean
+goreleaser release --snapshot --skip=archive,docker --clean
 ```
