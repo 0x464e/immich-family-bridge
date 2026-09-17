@@ -152,8 +152,27 @@ func (s *Store) AlbumByReplica(member, immichID string) (string, bool, error) {
 	return id, err == nil, err
 }
 func (s *Store) SetCover(album, logical string) error {
-	_, err := s.DB.Exec(`UPDATE logical_albums SET cover_logical_asset_id=? WHERE id=?`, logical, album)
+	var value any
+	if logical != "" {
+		value = logical
+	}
+	_, err := s.DB.Exec(`UPDATE logical_albums SET cover_logical_asset_id=? WHERE id=?`, value, album)
 	return err
+}
+
+func (s *Store) UpdateOriginPath(logicalID, memberID, oldPath, newPath string) error {
+	result, err := s.DB.Exec(`UPDATE asset_replicas SET filesystem_path=? WHERE logical_asset_id=? AND member_id=? AND role='origin' AND filesystem_path=?`, newPath, logicalID, memberID, oldPath)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return errors.New("origin path changed concurrently")
+	}
+	return nil
 }
 
 func (s *Store) UpdateAlbum(id, name, description, cover string) error {

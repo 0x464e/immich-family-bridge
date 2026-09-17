@@ -50,21 +50,15 @@ func (l Linker) Destination(family, member, originMember, originAsset, source st
 }
 
 func (l Linker) Ensure(source, dest string) error {
-	if !within(l.SourceRoot, source) || !within(l.BridgeRoot, dest) {
+	if !within(l.BridgeRoot, dest) {
 		return errors.New("link path outside configured root")
 	}
-	if err := noSymlink(source); err != nil {
+	src, err := l.SourceInfo(source)
+	if err != nil {
 		return err
 	}
 	if err := noSymlink(filepath.Dir(dest)); err != nil {
 		return err
-	}
-	src, err := os.Lstat(source)
-	if err != nil {
-		return err
-	}
-	if !src.Mode().IsRegular() {
-		return errors.New("source is not a regular file")
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0750); err != nil {
 		return err
@@ -94,4 +88,21 @@ func (l Linker) Ensure(source, dest string) error {
 		return err
 	}
 	return nil
+}
+
+func (l Linker) SourceInfo(source string) (os.FileInfo, error) {
+	if !within(l.SourceRoot, source) || within(l.BridgeRoot, source) {
+		return nil, errors.New("source path outside configured source root")
+	}
+	if err := noSymlink(source); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(source)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("source is not a regular file")
+	}
+	return info, nil
 }

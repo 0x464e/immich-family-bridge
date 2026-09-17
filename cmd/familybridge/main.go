@@ -14,7 +14,7 @@ import (
 
 	"github.com/0x464e/immich-family-bridge/internal/config"
 	"github.com/0x464e/immich-family-bridge/internal/httpapi"
-	"github.com/0x464e/immich-family-bridge/internal/immich/fake"
+	"github.com/0x464e/immich-family-bridge/internal/immich/httpclient"
 	"github.com/0x464e/immich-family-bridge/internal/reconcile"
 	"github.com/0x464e/immich-family-bridge/internal/store"
 )
@@ -34,17 +34,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
-	if err := db.Init(c.FamilyID, c.Members); err != nil {
-		log.Error("database initialization failed", "error", err)
-		os.Exit(1)
-	}
-	api, err := fake.New(c)
-	if err != nil {
-		log.Error("fake backend initialization failed", "error", err)
-		os.Exit(1)
-	}
+	api := httpclient.New(c.ImmichURL)
+	api.AdminKey = c.AdminKey
 	version, err := api.Version(context.Background())
-	if err != nil || !strings.HasPrefix(version, "3.2.") {
+	if err != nil || !strings.HasPrefix(version, "3.") {
 		log.Error("unsupported Immich API version", "version", version, "error", err)
 		os.Exit(1)
 	}
@@ -53,6 +46,10 @@ func main() {
 	defer stop()
 	if err := r.Check(ctx); err != nil {
 		log.Error("backend identity check failed", "error", err)
+		os.Exit(1)
+	}
+	if err := db.Init(c.FamilyID, c.Members); err != nil {
+		log.Error("database initialization failed", "error", err)
 		os.Exit(1)
 	}
 	interval, _ := c.Interval()
@@ -77,7 +74,7 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()
-	log.Info("Immich Family Bridge started", "listen", c.Listen, "mode", c.Mode)
+	log.Info("Immich Family Bridge started", "listen", c.Listen, "immich_version", version)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("HTTP server failed", "error", err)
 		os.Exit(1)

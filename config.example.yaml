@@ -1,42 +1,29 @@
-mode: fake
-family_id: demo-family
+family_id: my-family
 immich_url: http://immich-server:2283/api
-# Real mode is disabled. A future setup will provide admin_key_env for library scans.
-source_root: /testdata/source
-bridge_root: /testdata/bridge
-immich_bridge_root: /testdata/bridge
+admin_key_env: IMMICH_LIBRARY_ADMIN_KEY
+
+# All media roots below are paths inside the bridge container. Mount one
+# filesystem tree at /media so hardlinks cross no container mount boundary.
+source_root: /media
+source_mappings:
+  - immich_root: /data
+    local_root: /media/immich-upload
+  - immich_root: /external-sources
+    local_root: /media/external-sources
+bridge_root: /media/bridge-recipients
+immich_bridge_root: /bridge-recipients
+
 database: /state/bridge.sqlite
-fake_state: /state/fake.json
 listen: 0.0.0.0:8080
 api_token_env: FAMILYBRIDGE_API_TOKEN
 poll_interval: 30s
+
 members:
   - id: alice
-    user_id: fake-user-alice
-    library_id: fake-library-alice
+    user_id: replace-with-alice-immich-user-id
+    library_id: replace-with-alice-recipient-library-id
+    key_env: IMMICH_MEMBER_ALICE_KEY
   - id: bob
-    user_id: fake-user-bob
-    library_id: fake-library-bob
-  - id: carol
-    user_id: fake-user-carol
-    library_id: fake-library-carol
-fake:
-  assets:
-    - id: alice-photo-a
-      member: alice
-      path: /testdata/source/alice/photo-a.jpg
-      type: IMAGE
-    - id: bob-photo-b
-      member: bob
-      path: /testdata/source/bob/photo-b.jpg
-      type: IMAGE
-    - id: carol-photo-c
-      member: carol
-      path: /testdata/source/carol/photo-c.jpg
-      type: IMAGE
-  albums:
-    - id: alice-together
-      member: alice
-      name: Together
-      description: Family media
-      asset_ids: [alice-photo-a]
+    user_id: replace-with-bob-immich-user-id
+    library_id: replace-with-bob-recipient-library-id
+    key_env: IMMICH_MEMBER_BOB_KEY

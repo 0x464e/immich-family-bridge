@@ -12,7 +12,7 @@ import (
 )
 
 func TestPinnedOpenAPISubset(t *testing.T) {
-	b, e := os.ReadFile("../../../testdata/openapi/immich-3.2.0.json")
+	b, e := os.ReadFile("../../../testdata/openapi/immich-3.2.2.json")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -30,7 +30,7 @@ func TestPinnedOpenAPISubset(t *testing.T) {
 	if e := json.Unmarshal(b, &spec); e != nil {
 		t.Fatal(e)
 	}
-	if spec.Info.Version != "3.2.0" {
+	if spec.Info.Version != "3.2.2" {
 		t.Fatalf("spec version %s", spec.Info.Version)
 	}
 	for path, method := range map[string]string{"/users/me": "get", "/assets/{id}": "get", "/asset-files": "get", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/shared-links": "post"} {
@@ -79,5 +79,24 @@ func TestClientSearchAndBulkFailure(t *testing.T) {
 	}
 	if e := c.AddAssets(context.Background(), m, "album", []string{"a"}); e == nil {
 		t.Fatal("bulk item failure ignored")
+	}
+}
+
+func TestGetAssetRejectsEditedComponent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/assets/asset":
+			_, _ = w.Write([]byte(`{"id":"asset","ownerId":"user","originalPath":"/data/a.jpg","type":"IMAGE"}`))
+		case "/api/asset-files":
+			_, _ = w.Write([]byte(`[{"type":"preview","isEdited":true}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	a, err := c.GetAsset(context.Background(), domain.Member{Key: "secret"}, "asset")
+	if err != nil || a.Supported() {
+		t.Fatalf("edited asset should be unsupported: %+v %v", a, err)
 	}
 }
