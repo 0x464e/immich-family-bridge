@@ -1,60 +1,127 @@
 # Immich Family Bridge
 
-Immich Family Bridge mirrors registered albums across separate Immich users. Each member sees their own Immich asset IDs in their own album. Recipient assets are imported from hardlinks in a member-owned External Library. The service keeps logical mappings and album observations in SQLite and reconciles them on a timer or through its internal API.
+Immich Family Bridge keeps selected albums in sync across separate [Immich](https://immich.app/) accounts. Each member gets their own Immich asset IDs in their own albums and timeline. The bridge creates recipient files with hardlinks, imports them through member-owned [External Libraries](https://docs.immich.app/features/libraries/), and stores the mappings in SQLite. It neither copies media nor accesses Immich's database.
 
-The service connects to a real Immich API. There is no runnable fake mode. Unit tests use a test client and temporary files. The [live validation record](docs/live-validation.md) describes a disposable Immich 3.2.2 run on an NFS-backed ZFS dataset.
+**Project status:** v0.1.0 is an early release. It was exercised end to end with three accounts and ordinary JPEGs on a disposable Immich 3.2.2 instance backed by an NFS-mounted ZFS dataset. It has not been validated against a production library, and video and coupled media have not had live end-to-end testing. See the [validation record](docs/live-validation.md) and [current limits](#current-limits-and-production-pilot) before connecting important media.
 
-## Prepare Immich and storage
+## How it works
 
-1. Create at least two Immich member accounts. Create one External Library per member, owned by that member. Give each library exactly one import path: `<immich_bridge_root>/families/<family_id>/users/<member_id>/assets`. Library setup and scans require an Immich administrator. Mount the recipient tree read-only into the Immich server.
-2. Mount the **same parent filesystem tree once** into the bridge container. Both original media and recipient output must be under that one mount, or `link(2)` can fail with `EXDEV` even if two host paths reside on the same filesystem. The bridge process needs read access to originals and write access to recipient output. Keep SQLite on local storage, outside the media tree.
-3. Make a private copy of [config.example.yaml](config.example.yaml). Map each Immich `originalPath` prefix to its path inside the bridge container in `source_mappings`. For example, Immich may return `/data/library/...` for a managed upload while the bridge sees the same file at `/media/immich-upload/library/...`. Add a mapping for every source mount you intend to share. Set `source_root` to the common media mount and `bridge_root` to its recipient subtree.
-4. Create member API keys with `user.read`, `asset.read`, `assetFile.read`, `album.create`, `album.read`, `album.update`, `albumAsset.create`, and `albumAsset.delete`. Create a separate administrator key with `user.read`, `library.read`, and `library.update`. Put the keys and a random internal API token in a private env file based on [secrets.env.example](secrets.env.example). Keys are never logged.
+1. An administrator gives each member a dedicated External Library with one import path pointing to that member's bridge directory. The bridge also receives one API key per member and a separate administrator key for library scans.
+2. You register an existing Immich album. The bridge can attach other members' existing albums or create missing albums. The registered album supplies the initial name, description, and cover. An album named “Together” is an ordinary registered album.
+3. On each poll, the bridge reads the registered albums. It records a logical asset for each newly added, member-owned source asset and maps that asset to every member's Immich asset ID. Initial membership is the union of assets in the attached albums. Later additions and removals update logical membership; an addition wins if members add and remove the same asset concurrently.
+4. For each recipient, the bridge hardlinks the source into a stable path under `families/<family>/users/<member>/assets/`. It asks Immich to scan that member's External Library, waits for the import, and accepts its ID only when the search finds exactly one asset with the expected owner, library, and full path. It then adds that ID to the recipient album.
+5. SQLite stores asset and album mappings, observed membership, sharing references, and pending states. Repeated cycles resume after an import delay, API outage, or bridge restart. Several albums can reference the same logical asset without creating more recipient files.
 
-The bridge checks member-key identities and each recipient library's owner and import path at startup. It rejects Immich major versions other than 3. Its HTTP adapter is pinned to the [Immich 3.2.2 OpenAPI schema](https://github.com/immich-app/immich/blob/v3.2.2/open-api/immich-openapi-specs.json); validate behavior before adopting a newer release.
+Recipient assets appear in each owner's normal Immich timeline because they are External Library assets. Each account's favorites, edits, people labels, and other Immich-local metadata remain independent. Album names and descriptions are managed through the bridge API; direct edits to replica albums are overwritten on reconciliation.
 
-## Run
+## Requirements
 
-Copy [compose.env.example](compose.env.example), fill in absolute host paths and the Immich Docker network name, then run:
+- A reachable Immich **3.x** server. The HTTP adapter is tested against the [Immich 3.2.2 OpenAPI schema](https://github.com/immich-app/immich/blob/v3.2.2/open-api/immich-openapi-specs.json) and a disposable 3.2.2 instance. Startup rejects other major versions; validate newer 3.x releases separately.
+- At least two Immich accounts with stable user IDs, one dedicated External Library per member, and administrator access to create the libraries. Each library must have exactly one import path and be owned by its member.
+- Member API keys with `user.read`, `asset.read`, `assetFile.read`, `album.create`, `album.read`, `album.update`, `albumAsset.create`, and `albumAsset.delete`. The administrator key needs `user.read`, `library.read`, and `library.update`. These scopes were validated on Immich 3.2.2.
+- Linux Docker Engine and Docker Compose for the supplied deployment, or an equivalent container setup. Building from source requires Go 1.25. Published images are available as [`0x464e/immich-family-bridge:0.1.0`](https://hub.docker.com/r/0x464e/immich-family-bridge) and `:latest` for `linux/amd64` and `linux/arm64`.
+- A filesystem and mount layout that permits hardlinks from originals to recipient files. Both must be visible beneath **one mount inside the bridge container**. Separate bind mounts can return `EXDEV` even when their host paths are on the same device. An NFS server must permit hardlinks for the bridge's UID/GID.
+- Local persistent storage for the bridge's SQLite database, separate from the media tree. Back up this database with the Immich and media data; it contains the identity mappings used to recognize bridge-created assets.
 
-```sh
-docker compose --env-file /path/to/bridge-compose.env up --build -d
-curl http://127.0.0.1:8081/readyz
-```
+Hardlinks share one underlying file. They save storage but are **not independent copies or backups**: changing bytes through any writable link changes the source. Give the bridge process read permission to originals and write permission only to its recipient tree using filesystem ownership or ACLs. Mount the recipient tree read-only in Immich. The supplied Compose file mounts the common media tree read-write into the bridge container, so host permissions must enforce that boundary.
 
-The Compose service binds to localhost by default. `GET /healthz` checks the process; `GET /readyz` also checks SQLite, Immich connectivity, member identities, and recipient libraries. The internal API requires `Authorization: Bearer <FAMILYBRIDGE_API_TOKEN>`:
+## Set up storage and Immich
 
-- `GET /api/members`, `GET /api/albums`, `GET /api/replicas`, `GET /api/assets/{logicalAssetId}`, and `GET /api/filesystem` inspect mappings and link health.
-- `POST /api/albums` registers an existing member album. Send `memberId` and `albumId`; optionally send `replicas`, a map of other member IDs to existing album IDs. Initial reconciliation takes the union of their assets.
-- `PATCH /api/albums/{logicalAlbumId}` updates the canonical name, description, and optional `coverLogicalAssetId`.
-- `POST /api/reconcile/dry-run` reports proposed actions without writes. `POST /api/reconcile` runs a cycle.
+This example shows how the paths relate. Adapt them to your containers:
 
-For example, register an album after authenticating to the bridge API:
+| Purpose | Example path |
+| --- | --- |
+| Shared host media tree | `/srv/immich-media` |
+| Immich-managed originals on the host | `/srv/immich-media/immich-upload` |
+| Original paths reported by Immich | `/data/...` |
+| Single bridge container media mount | `/srv/immich-media:/media` |
+| Bridge recipient root | `/media/bridge-recipients` |
+| Immich recipient mount | `/srv/immich-media/bridge-recipients:/bridge-recipients:ro` |
+| Bridge SQLite state | A local directory mounted at `/state` |
 
-```sh
-curl -H "Authorization: Bearer $FAMILYBRIDGE_API_TOKEN" \
+The bridge config maps Immich's `/data` paths to `/media/immich-upload` with `source_mappings`. Add a mapping for every other source tree you intend to share. Mappings must resolve to existing directories under `source_root`, outside `bridge_root`. Immich's `originalPath` is a **container path**, not necessarily a host path.
+
+Create the recipient directories before creating libraries, and make them readable by Immich. For family `my-family` and member `alice`, the library's **only** import path is:
+
+~~~text
+/bridge-recipients/families/my-family/users/alice/assets
+~~~
+
+Repeat for every configured member ID. The bridge checks the library owner and exact import path at startup. Mount the recipient root read-only into the Immich server and any separate worker that scans libraries. Immich documents [External Library paths and scans](https://docs.immich.app/features/libraries/); moving an imported file can cause Immich to treat it as a new asset and lose metadata stored only in Immich. Keep recipient paths stable.
+
+Test the actual deployment mount and UID/GID with a disposable source file before using real media. Two paths on the same host filesystem do not prove that `link(2)` works across the mounts seen by the bridge container.
+
+## Configure and run
+
+1. Copy [config.example.yaml](config.example.yaml) to a private YAML file. Set `family_id`, the Immich API URL ending in `/api`, `source_root`, `source_mappings`, `bridge_root`, `immich_bridge_root`, the local SQLite path, and every member's bridge ID, Immich user ID, library ID, and key environment variable. Bridge IDs and the family ID become part of stable paths. The member set cannot be changed after database initialization without an explicit migration.
+2. Copy [secrets.env.example](secrets.env.example) to a private environment file. Supply the member keys, administrator key, and a random `FAMILYBRIDGE_API_TOKEN`. Keep both private files out of Git. API keys are not logged.
+3. Copy [compose.env.example](compose.env.example) to a private Compose environment file. Set absolute host paths, the Immich Docker network name, and `PUID`/`PGID` if the default `1000:1000` cannot read sources and write recipient files and SQLite state.
+4. Start the service from this repository:
+
+   ~~~sh
+   docker compose --env-file /absolute/path/to/bridge-compose.env up --build -d
+   curl --fail-with-body http://127.0.0.1:8081/readyz
+   ~~~
+
+The supplied [compose.yaml](compose.yaml) builds the checked-out source and binds the bridge API to `127.0.0.1:8081`. To run a published release, use `0x464e/immich-family-bridge:0.1.0` in your own Compose deployment instead of the local `build` directive. Pin a version tag for repeatable deployments.
+
+`GET /healthz` reports whether the HTTP process responds. `GET /readyz` also checks SQLite, Immich reachability, member-key identity, and each recipient library's owner and import path. The service will not start if initial identity checks fail.
+
+## Register albums and inspect status
+
+The internal API requires `Authorization: Bearer <FAMILYBRIDGE_API_TOKEN>` for every `/api/` endpoint. Keep it on localhost or behind an authenticated private network. Album registration creates missing member albums immediately; polling or a manual reconciliation then fills them.
+
+~~~sh
+# Set BRIDGE_TOKEN to the private token from your secrets file.
+curl --fail-with-body -sS \
+  -H "Authorization: Bearer $BRIDGE_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"memberId":"alice","albumId":"<alice-album-id>"}' \
+  -d '{"memberId":"alice","albumId":"<alice-immich-album-id>"}' \
   http://127.0.0.1:8081/api/albums
-```
 
-## Reconciliation and limits
+# Preview and then run one cycle.
+curl --fail-with-body -sS -X POST \
+  -H "Authorization: Bearer $BRIDGE_TOKEN" \
+  http://127.0.0.1:8081/api/reconcile/dry-run
+curl --fail-with-body -sS -X POST \
+  -H "Authorization: Bearer $BRIDGE_TOKEN" \
+  http://127.0.0.1:8081/api/reconcile
+~~~
 
-The first cycle takes the union of member-owned assets in the registered albums. Later member additions and removals update canonical membership; concurrent additions win over removals. One asset can have references from multiple logical albums. The bridge writes recipient hardlinks at stable paths, scans the recipient's External Library, waits for a unique matching imported asset, then adds that member's Immich asset ID to their album. Immich's `originalPath` search can return prefix matches, so the bridge checks the exact owner, library, and path before storing an ID.
+`POST /api/albums` also accepts `"replicas":{"bob":"<bob-album-id>"}` to attach existing albums for other members. The first reconciliation includes the union of their member-owned assets. Register each logical album you want bridged, including a catch-all “Together” album if desired. Albums are not discovered automatically.
 
-The linker rejects symlinks, path escapes, nonregular sources, conflicting destination inodes, and cross-filesystem links. It never copies as a fallback. Removing the last album reference marks recipient files `pending_removal`; it does not unlink them or delete Immich assets. Source deletion and unsupported coupled media remain visible states. The first media adapter handles ordinary single-file images and videos; Live Photos, motion photos, stacks, sidecars, and edited forms are skipped. Per-user Immich metadata remains separate. Public links are not created.
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/members` | Configured bridge IDs, Immich user IDs, and recipient library IDs |
+| `GET /api/albums` | Registered logical albums and canonical metadata |
+| `GET /api/replicas` | Asset IDs, paths, lifecycle states, and errors |
+| `GET /api/assets/{logicalAssetId}` | One logical asset and its per-member replicas |
+| `GET /api/filesystem` | Recipient file existence, inode equality, and link details |
+| `POST /api/albums` | Register an Immich album and optional existing replicas |
+| `PATCH /api/albums/{logicalAlbumId}` | Set `name`, `description`, and optional `coverLogicalAssetId` |
+| `POST /api/reconcile/dry-run` | Inspect proposed actions without writes |
+| `POST /api/reconcile` | Run one reconciliation cycle |
 
-External Library paths must stay stable because moving an imported file can lose Immich-local metadata. On NFS, rely on explicit library scans and polling instead of file watching. Before attaching production media, confirm UID/GID, NFS hardlink permissions, mount topology, import paths, and a successful disposable end-to-end cycle. The bridge application never modifies or unlinks an Immich-managed original.
+The `PATCH` body should include the complete desired name and description; an omitted description becomes empty. Set a cover only after that logical asset is known and mapped. The bridge leaves the cover unchanged for a member until that member's asset ID is ready.
 
-Immich may move a freshly uploaded original into a storage-template path after the bridge first sees it. The bridge updates its stored origin path only when the new file has the same inode as the old source or existing recipient links. A different-inode move remains visible for review; recipient paths never change.
+Expect `pending_import` for a while after a scan; the next poll retries the lookup. Inspect `GET /api/replicas`, `GET /api/filesystem`, and the JSON container logs when an asset does not appear. A temporarily unavailable Immich API makes `/readyz` return 503. The bridge retains SQLite state and resumes on later cycles.
 
-## Verify and release
+## Current limits and production pilot
 
-```sh
+- Only ordinary single-file images and videos are modeled. Live Photos, motion photos, stacks, sidecars, edits, and other coupled forms are marked `unsupported`. Ordinary JPEGs have live end-to-end validation; videos still need a live trial.
+- Removing an asset from one logical album removes only that album's sharing reference. After its final reference is gone, recipient files are marked `pending_removal` and are **not** unlinked; Immich assets are not deleted. Deleting an album produces a visible reconciliation error; a missing recipient asset may be rediscovered or left pending.
+- The bridge does not create public shared links. It does not mirror favorites, people, edits, or other personal Immich metadata.
+- If Immich moves a managed original to a storage-template path, the bridge accepts the new path only after matching the old source or existing recipient links by inode. A move that changes the inode needs manual investigation. Recipient paths remain stable.
+- The service supports one family per SQLite database and at least two configured members. It has no workflow yet for removing members, changing their identities, or cleaning up abandoned recipient files.
+
+For a real Immich instance, establish backups for SQLite state, the Immich database, and media; validate API-key scopes and all path mappings against that instance; and run a small album of disposable photos through the exact production mounts and service UID/GID. Confirm recipient inodes match their sources, imports resolve to the expected owner and library, and a bridge restart produces no new changes. Expand to important albums only after that pilot. The application does not modify or unlink Immich-managed originals, but the shared-file behavior of hardlinks and host permissions still matter.
+
+## Development and releases
+
+~~~sh
 go test ./...
 go vet ./...
 goreleaser check
-goreleaser release --snapshot --skip=archive,docker --clean
-```
+~~~
 
-The local Git repository uses conventional commits on `master`, release-please, and GoReleaser. A GitHub release publishes only the `0x464e/immich-family-bridge` multi-platform Docker Hub image; Linux binaries are intermediate build inputs. The first proposed version is `v0.1.0`. Configure `ACTIONS_PAT` and `DOCKER_PAT` before enabling those workflows on GitHub. No Git remote is configured and nothing has been pushed.
+Unit tests use temporary media and a fake Immich client; there is no fake runtime mode. The GitHub workflows use Release Please on `master` and GoReleaser on a GitHub release. Releases publish only the multi-platform Docker image; compiled Go binaries are intermediate image inputs. See [CHANGELOG.md](CHANGELOG.md) for released changes.
