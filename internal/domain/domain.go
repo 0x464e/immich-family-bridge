@@ -41,6 +41,12 @@ type Album struct {
 	CoverID     string `json:"coverId"`
 }
 
+type Library struct {
+	ID          string   `json:"id"`
+	OwnerID     string   `json:"ownerId"`
+	ImportPaths []string `json:"importPaths"`
+}
+
 type LogicalAsset struct {
 	ID           string `json:"id"`
 	OriginMember string `json:"originMember"`

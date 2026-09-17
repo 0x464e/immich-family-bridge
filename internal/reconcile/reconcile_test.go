@@ -10,7 +10,7 @@ import (
 
 	"github.com/0x464e/immich-family-bridge/internal/config"
 	"github.com/0x464e/immich-family-bridge/internal/domain"
-	"github.com/0x464e/immich-family-bridge/internal/immich/fake"
+	fake "github.com/0x464e/immich-family-bridge/internal/immich/testfake"
 	"github.com/0x464e/immich-family-bridge/internal/store"
 )
 
@@ -27,7 +27,8 @@ func setup(t *testing.T) (config.Config, *store.Store, *fake.Client, *Reconciler
 	bPath := filepath.Join(source, "b.jpg")
 	_ = os.WriteFile(aPath, []byte("photo a"), 0640)
 	_ = os.WriteFile(bPath, []byte("photo b"), 0640)
-	c := config.Config{Mode: "fake", FamilyID: "family", SourceRoot: source, BridgeRoot: bridge, ImmichBridgeRoot: "/immich-bridge", Database: filepath.Join(root, "state", "db.sqlite"), FakeState: filepath.Join(root, "state", "fake.json"), APITokenEnv: "TEST_TOKEN", APIToken: "test", PollInterval: "30s", Members: []domain.Member{{ID: "alice", UserID: "user-a", LibraryID: "lib-a"}, {ID: "bob", UserID: "user-b", LibraryID: "lib-b"}, {ID: "carol", UserID: "user-c", LibraryID: "lib-c"}}, Fake: config.Fake{Assets: []config.FakeAsset{{ID: "a1", Member: "alice", Path: aPath}, {ID: "b1", Member: "bob", Path: bPath}}, Albums: []config.FakeAlbum{{ID: "trip", Member: "alice", Name: "Trip", AssetIDs: []string{"a1"}}, {ID: "best", Member: "alice", Name: "Best", AssetIDs: []string{"a1"}}}}}
+	c := config.Config{FamilyID: "family", SourceRoot: source, SourceMappings: []config.SourceMapping{{ImmichRoot: source, LocalRoot: source}}, BridgeRoot: bridge, ImmichBridgeRoot: "/immich-bridge", Database: filepath.Join(root, "state", "db.sqlite"), APITokenEnv: "TEST_TOKEN", APIToken: "test", PollInterval: "30s", Members: []domain.Member{{ID: "alice", UserID: "user-a", LibraryID: "lib-a"}, {ID: "bob", UserID: "user-b", LibraryID: "lib-b"}, {ID: "carol", UserID: "user-c", LibraryID: "lib-c"}}}
+	seed := fake.Seed{Assets: []fake.SeedAsset{{ID: "a1", Member: "alice", Path: aPath}, {ID: "b1", Member: "bob", Path: bPath}}, Albums: []fake.SeedAlbum{{ID: "trip", Member: "alice", Name: "Trip", AssetIDs: []string{"a1"}}, {ID: "best", Member: "alice", Name: "Best", AssetIDs: []string{"a1"}}}}
 	db, e := store.Open(c.Database)
 	if e != nil {
 		t.Fatal(e)
@@ -36,7 +37,7 @@ func setup(t *testing.T) (config.Config, *store.Store, *fake.Client, *Reconciler
 	if e := db.Init(c.FamilyID, c.Members); e != nil {
 		t.Fatal(e)
 	}
-	api, e := fake.New(c)
+	api, e := fake.New(c, filepath.Join(root, "state", "fake.json"), seed)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -149,7 +150,7 @@ func TestNUserAlbumFlowRestartAndReferences(t *testing.T) {
 	if e := r.Run(ctx); e != nil {
 		t.Fatal("retry failed:", e)
 	}
-	api2, e := fake.New(c)
+	api2, e := fake.New(c, filepath.Join(filepath.Dir(c.Database), "fake.json"), fake.Seed{})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -247,4 +248,51 @@ func TestMissingSourceRetainsLinks(t *testing.T) {
 		t.Fatal("recipient link removed:", e)
 	}
 	_ = album
+}
+
+func TestOriginPathMoveRequiresSameInode(t *testing.T) {
+	c, db, api, r := setup(t)
+	ctx := context.Background()
+	if _, err := r.Register(ctx, "alice", "trip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lid, _, _ := db.FindReplicaAsset("alice", "a1")
+	origin, _, _ := db.Replica(lid, "alice")
+	recipient, _, _ := db.Replica(lid, "bob")
+	moved := filepath.Join(c.SourceRoot, "moved.jpg")
+	if err := os.Rename(origin.Path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.MoveAssetPath("a1", moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	origin, _, _ = db.Replica(lid, "alice")
+	if origin.Path != moved {
+		t.Fatalf("safe same-inode move not recorded: %+v", origin)
+	}
+	a, _ := os.Stat(moved)
+	b, _ := os.Stat(recipient.Path)
+	if !os.SameFile(a, b) {
+		t.Fatal("recipient changed inode after source move")
+	}
+	different := filepath.Join(c.SourceRoot, "different.jpg")
+	if err := os.WriteFile(different, []byte("different inode"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.MoveAssetPath("a1", different); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	origin, _, _ = db.Replica(lid, "alice")
+	if origin.Path != moved {
+		t.Fatalf("different inode replaced origin path: %+v", origin)
+	}
 }

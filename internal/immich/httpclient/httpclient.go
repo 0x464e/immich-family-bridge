@@ -1,5 +1,4 @@
-// Package httpclient implements the documented Immich 3.2 API subset. The
-// application does not enable this adapter for filesystem writes yet.
+// Package httpclient implements the documented Immich 3.2 API subset.
 package httpclient
 
 import (
@@ -85,6 +84,14 @@ func (c *Client) Me(ctx context.Context, m domain.Member) (string, error) {
 	e := c.request(ctx, m.Key, "GET", "/users/me", nil, &v)
 	return v.ID, e
 }
+func (c *Client) GetLibrary(ctx context.Context, m domain.Member) (domain.Library, error) {
+	var library domain.Library
+	if c.AdminKey == "" {
+		return library, errors.New("admin API key required to inspect external library")
+	}
+	err := c.request(ctx, c.AdminKey, "GET", "/libraries/"+url.PathEscape(m.LibraryID), nil, &library)
+	return library, err
+}
 func (c *Client) GetAsset(ctx context.Context, m domain.Member, id string) (domain.Asset, error) {
 	var a assetDTO
 	e := c.request(ctx, m.Key, "GET", "/assets/"+url.PathEscape(id), nil, &a)
@@ -93,7 +100,8 @@ func (c *Client) GetAsset(ctx context.Context, m domain.Member, id string) (doma
 	}
 	out := a.domain()
 	var files []struct {
-		Type string `json:"type"`
+		Type     string `json:"type"`
+		IsEdited bool   `json:"isEdited"`
 	}
 	e = c.request(ctx, m.Key, "GET", "/asset-files?assetId="+url.QueryEscape(id), nil, &files)
 	if e != nil {
@@ -102,6 +110,9 @@ func (c *Client) GetAsset(ctx context.Context, m domain.Member, id string) (doma
 	for _, file := range files {
 		if file.Type == "sidecar" {
 			out.Sidecar = true
+		}
+		if file.IsEdited {
+			out.Edited = true
 		}
 	}
 	return out, nil

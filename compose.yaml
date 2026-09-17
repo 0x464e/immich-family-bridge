@@ -7,16 +7,23 @@ services:
     init: true
     security_opt:
       - no-new-privileges:true
-    environment:
-      FAMILYBRIDGE_API_TOKEN: "${FAMILYBRIDGE_API_TOKEN:-local-fixture-token}"
+    env_file:
+      - ${BRIDGE_ENV_FILE:?Set BRIDGE_ENV_FILE to a private env file}
     volumes:
-      - ./config.example.yaml:/etc/familybridge/config.yaml:ro
-      - ./testdata:/testdata
-      - ./testdata/state:/state
+      - ${BRIDGE_CONFIG:?Set BRIDGE_CONFIG to a validated YAML config}:/etc/familybridge/config.yaml:ro
+      - ${BRIDGE_MEDIA_ROOT:?Set BRIDGE_MEDIA_ROOT to the common media tree}:/media
+      - ${BRIDGE_STATE_ROOT:?Set BRIDGE_STATE_ROOT to local state storage}:/state
+    networks:
+      - immich
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${BRIDGE_PORT:-8081}:8080"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 3s
       retries: 3
+
+networks:
+  immich:
+    external: true
+    name: ${IMMICH_NETWORK:?Set IMMICH_NETWORK to the Immich Docker network}

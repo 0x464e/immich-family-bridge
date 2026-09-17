@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,40 +14,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type FakeAsset struct {
-	ID     string `yaml:"id"`
-	Member string `yaml:"member"`
-	Path   string `yaml:"path"`
-	Type   string `yaml:"type"`
+type SourceMapping struct {
+	ImmichRoot string `yaml:"immich_root"`
+	LocalRoot  string `yaml:"local_root"`
 }
-type FakeAlbum struct {
-	ID          string   `yaml:"id"`
-	Member      string   `yaml:"member"`
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description"`
-	AssetIDs    []string `yaml:"asset_ids"`
-}
-type Fake struct {
-	Assets []FakeAsset `yaml:"assets"`
-	Albums []FakeAlbum `yaml:"albums"`
-}
+
 type Config struct {
-	Mode             string          `yaml:"mode"`
 	FamilyID         string          `yaml:"family_id"`
 	ImmichURL        string          `yaml:"immich_url"`
 	AdminKeyEnv      string          `yaml:"admin_key_env"`
 	AdminKey         string          `yaml:"-"`
 	SourceRoot       string          `yaml:"source_root"`
+	SourceMappings   []SourceMapping `yaml:"source_mappings"`
 	BridgeRoot       string          `yaml:"bridge_root"`
 	ImmichBridgeRoot string          `yaml:"immich_bridge_root"`
 	Database         string          `yaml:"database"`
-	FakeState        string          `yaml:"fake_state"`
 	Listen           string          `yaml:"listen"`
 	APITokenEnv      string          `yaml:"api_token_env"`
 	APIToken         string          `yaml:"-"`
 	PollInterval     string          `yaml:"poll_interval"`
 	Members          []domain.Member `yaml:"members"`
-	Fake             Fake            `yaml:"fake"`
 }
 
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
@@ -61,9 +48,6 @@ func Load(path string) (Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
 		return c, err
-	}
-	if c.Mode == "" {
-		c.Mode = "fake"
 	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8080"
@@ -88,45 +72,54 @@ func Load(path string) (Config, error) {
 func (c Config) Interval() (time.Duration, error) { return time.ParseDuration(c.PollInterval) }
 
 func (c Config) Validate() error {
-	if c.Mode != "fake" {
-		return errors.New("only fake mode is enabled; real Immich integration awaits disposable-instance validation")
-	}
 	if !safeID.MatchString(c.FamilyID) {
 		return errors.New("invalid family_id")
+	}
+	u, err := url.Parse(c.ImmichURL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.TrimRight(u.Path, "/") != "/api" {
+		return errors.New("immich_url must be an http(s) URL ending in /api")
 	}
 	if c.Database == "" || !filepath.IsAbs(c.Database) {
 		return errors.New("database must be an absolute path")
 	}
-	if c.SourceRoot == "" || !filepath.IsAbs(c.SourceRoot) || c.BridgeRoot == "" || !filepath.IsAbs(c.BridgeRoot) {
-		return errors.New("source_root and bridge_root must be absolute")
+	for name, path := range map[string]string{"source_root": c.SourceRoot, "bridge_root": c.BridgeRoot, "immich_bridge_root": c.ImmichBridgeRoot} {
+		if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+			return fmt.Errorf("%s must be a clean absolute non-root path", name)
+		}
 	}
-	if c.ImmichBridgeRoot == "" || !filepath.IsAbs(c.ImmichBridgeRoot) {
-		return errors.New("immich_bridge_root must be absolute")
+	if c.APITokenEnv == "" || c.APIToken == "" || c.AdminKeyEnv == "" || c.AdminKey == "" {
+		return errors.New("API token and admin key must resolve from environment variables")
 	}
-	if c.FakeState == "" || !filepath.IsAbs(c.FakeState) {
-		return errors.New("fake_state must be an absolute path")
+	if c.SourceRoot == c.BridgeRoot || inside(c.BridgeRoot, c.SourceRoot) {
+		return errors.New("bridge_root must not contain source_root")
 	}
-	if c.APITokenEnv == "" || c.APIToken == "" {
-		return errors.New("api_token_env must name a nonempty environment variable")
+	if inside(c.SourceRoot, c.Database) || inside(c.BridgeRoot, c.Database) {
+		return errors.New("database must be outside source and bridge roots")
 	}
-	if c.SourceRoot == c.BridgeRoot || inside(c.SourceRoot, c.BridgeRoot) || inside(c.BridgeRoot, c.SourceRoot) {
-		return errors.New("source_root and bridge_root must not overlap")
+	if info, e := os.Lstat(c.SourceRoot); e != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("source_root must be an existing ordinary directory")
 	}
-	if inside(c.SourceRoot, c.Database) || inside(c.BridgeRoot, c.Database) || inside(c.SourceRoot, c.FakeState) || inside(c.BridgeRoot, c.FakeState) {
-		return errors.New("state files must be outside source and bridge roots")
+	if info, e := os.Lstat(c.BridgeRoot); e == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+		return errors.New("bridge_root must be an ordinary directory")
+	} else if e != nil && !errors.Is(e, os.ErrNotExist) {
+		return fmt.Errorf("bridge_root: %w", e)
 	}
-	if filepath.Base(c.SourceRoot) != "source" || filepath.Base(c.BridgeRoot) != "bridge" || filepath.Dir(c.SourceRoot) != filepath.Dir(c.BridgeRoot) {
-		return errors.New("fake mode requires sibling source and bridge fixture directories")
+	if len(c.SourceMappings) == 0 {
+		return errors.New("at least one source_mappings entry is required")
 	}
-	marker, err := os.ReadFile(filepath.Join(filepath.Dir(c.SourceRoot), ".familybridge-fixture"))
-	if err != nil || strings.TrimSpace(string(marker)) != "familybridge-test-fixture-v1" {
-		return errors.New("fake fixture marker missing or invalid")
-	}
-	if info, e := os.Lstat(c.SourceRoot); e != nil || !info.IsDir() {
-		return errors.New("fixture source_root must exist as a directory")
-	}
-	if info, e := os.Lstat(c.BridgeRoot); e == nil && !info.IsDir() {
-		return errors.New("fixture bridge_root must be a directory")
+	for i, mapping := range c.SourceMappings {
+		if !cleanNonRoot(mapping.ImmichRoot) || !cleanNonRoot(mapping.LocalRoot) || !(mapping.LocalRoot == c.SourceRoot || inside(c.SourceRoot, mapping.LocalRoot)) || mapping.LocalRoot == c.BridgeRoot || inside(mapping.LocalRoot, c.BridgeRoot) || inside(c.BridgeRoot, mapping.LocalRoot) {
+			return fmt.Errorf("invalid source_mappings entry %d", i)
+		}
+		if info, err := os.Lstat(mapping.LocalRoot); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("source_mappings entry %d local_root must be an existing ordinary directory", i)
+		}
+		for j := 0; j < i; j++ {
+			other := c.SourceMappings[j].ImmichRoot
+			if mapping.ImmichRoot == other || inside(mapping.ImmichRoot, other) || inside(other, mapping.ImmichRoot) {
+				return errors.New("source_mappings Immich roots must not overlap")
+			}
+		}
 	}
 	d, err := c.Interval()
 	if err != nil || d < time.Second {
@@ -139,8 +132,8 @@ func (c Config) Validate() error {
 	users := map[string]bool{}
 	libraries := map[string]bool{}
 	for _, m := range c.Members {
-		if !safeID.MatchString(m.ID) || m.UserID == "" || m.LibraryID == "" {
-			return fmt.Errorf("invalid member %q", m.ID)
+		if !safeID.MatchString(m.ID) || m.UserID == "" || m.LibraryID == "" || m.KeyEnv == "" || m.Key == "" {
+			return fmt.Errorf("invalid member %q or unresolved key", m.ID)
 		}
 		if ids[m.ID] || users[m.UserID] || libraries[m.LibraryID] {
 			return errors.New("member ids, user ids, and library ids must each be unique")
@@ -149,21 +142,33 @@ func (c Config) Validate() error {
 		users[m.UserID] = true
 		libraries[m.LibraryID] = true
 	}
-	for _, a := range c.Fake.Assets {
-		if !ids[a.Member] || a.ID == "" || !inside(c.SourceRoot, a.Path) {
-			return fmt.Errorf("invalid fake asset %q", a.ID)
-		}
-		info, e := os.Lstat(a.Path)
-		if e != nil || !info.Mode().IsRegular() {
-			return fmt.Errorf("fake asset %q must be a regular file", a.ID)
-		}
-	}
-	for _, a := range c.Fake.Albums {
-		if !ids[a.Member] || a.ID == "" || a.Name == "" {
-			return fmt.Errorf("invalid fake album %q", a.ID)
-		}
-	}
 	return nil
+}
+
+// SourcePath maps Immich's originalPath into this process's source mount.
+func (c Config) SourcePath(immichPath string) (string, error) {
+	if !filepath.IsAbs(immichPath) || filepath.Clean(immichPath) != immichPath {
+		return "", errors.New("Immich originalPath is outside configured source root")
+	}
+	for _, mapping := range c.SourceMappings {
+		if !inside(mapping.ImmichRoot, immichPath) {
+			continue
+		}
+		rel, err := filepath.Rel(mapping.ImmichRoot, immichPath)
+		if err != nil {
+			return "", err
+		}
+		path := filepath.Join(mapping.LocalRoot, rel)
+		if !inside(c.SourceRoot, path) {
+			return "", errors.New("mapped source path escaped source root")
+		}
+		return path, nil
+	}
+	return "", errors.New("Immich originalPath has no configured source mapping")
+}
+
+func cleanNonRoot(path string) bool {
+	return path != "" && filepath.IsAbs(path) && filepath.Clean(path) == path && path != "/"
 }
 
 func inside(root, path string) bool {

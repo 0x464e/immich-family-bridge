@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -104,8 +105,10 @@ func (r *Reconciler) RegisterWithReplicas(ctx context.Context, memberID, albumID
 	if a.CoverID != "" {
 		asset, e := r.API.GetAsset(ctx, m, a.CoverID)
 		if e == nil && asset.OwnerID == m.UserID {
-			if lid, e := r.DB.EnsureOrigin(r.C.FamilyID, m.ID, asset); e == nil {
-				_ = r.DB.SetCover(id, lid)
+			if asset, e = r.mappedAsset(asset); e == nil {
+				if lid, e := r.DB.EnsureOrigin(r.C.FamilyID, m.ID, asset); e == nil {
+					_ = r.DB.SetCover(id, lid)
+				}
 			}
 		}
 	}
@@ -220,6 +223,10 @@ func (r *Reconciler) runAlbum(ctx context.Context, a domain.LogicalAlbum) error 
 				if asset.OwnerID != m.UserID || asset.LibraryID == m.LibraryID {
 					return fmt.Errorf("unknown bridge or foreign asset %s in %s album", asset.ID, m.ID)
 				}
+				asset, e = r.mappedAsset(asset)
+				if e != nil {
+					return fmt.Errorf("source path for asset %s: %w", asset.ID, e)
+				}
 				lid, e = r.DB.EnsureOrigin(r.C.FamilyID, m.ID, asset)
 				if e != nil {
 					return e
@@ -278,6 +285,12 @@ func (r *Reconciler) runAlbum(ctx context.Context, a domain.LogicalAlbum) error 
 	if err != nil {
 		return err
 	}
+	if a.CoverID != "" && !desired[a.CoverID] {
+		if err := r.DB.SetCover(a.ID, ""); err != nil {
+			return err
+		}
+		a.CoverID = ""
+	}
 	for _, o := range obs {
 		for logicalID := range desired {
 			rep, err := r.ensureReplica(ctx, logicalID, o.member)
@@ -335,7 +348,37 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 		return current, err
 	}
 	if logical.OriginMember == m.ID {
-		return current, errors.New("missing origin replica mapping")
+		if !found || current.Role != "origin" || current.AssetID != logical.OriginAsset {
+			return current, errors.New("missing origin replica mapping")
+		}
+		originAsset, e := r.API.GetAsset(ctx, m, current.AssetID)
+		if e != nil {
+			current.State = "api_error"
+			if errors.Is(e, immich.ErrNotFound) {
+				current.State = "source_missing"
+			}
+			current.Error = e.Error()
+			_ = r.DB.UpsertReplica(current)
+			return current, e
+		}
+		path, e := r.C.SourcePath(originAsset.OriginalPath)
+		if e != nil || originAsset.OwnerID != m.UserID {
+			return current, errors.New("origin asset path or owner changed")
+		}
+		if path != current.Path {
+			if e := r.rebindOriginPath(logicalID, m.ID, current.Path, path); e != nil {
+				return current, fmt.Errorf("origin path changed: %w", e)
+			}
+			current.Path = path
+			r.Log.Info("origin path updated after same-inode move", "logical_asset_id", logicalID, "member_id", m.ID)
+		}
+		if current.State != "ready" || current.Error != "" {
+			current.State, current.Error = "ready", ""
+			if e := r.DB.UpsertReplica(current); e != nil {
+				return current, e
+			}
+		}
+		return current, nil
 	}
 	origin, ok := r.member(logical.OriginMember)
 	if !ok {
@@ -366,16 +409,31 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 		_ = r.DB.UpsertReplica(current)
 		return current, errors.New(current.Error)
 	}
+	asset, err = r.mappedAsset(asset)
+	if err != nil {
+		return current, err
+	}
 	path, err := r.FS.Destination(r.C.FamilyID, m.ID, logical.OriginMember, logical.OriginAsset, asset.OriginalPath)
 	if err != nil {
 		return current, err
+	}
+	rel, err := filepath.Rel(r.C.BridgeRoot, path)
+	if err != nil {
+		return current, err
+	}
+	remotePath := filepath.Join(r.C.ImmichBridgeRoot, rel)
+	if !strings.HasPrefix(remotePath, r.C.ImmichBridgeRoot+string(filepath.Separator)) {
+		return current, errors.New("invalid remote bridge path")
 	}
 	if found && current.Path != "" && current.Path != path {
 		return current, errors.New("stored recipient path differs from deterministic path")
 	}
 	if wasReady {
 		remote, e := r.API.GetAsset(ctx, m, current.AssetID)
-		if e == nil && remote.OwnerID == m.UserID && remote.LibraryID == m.LibraryID {
+		if e == nil && (remote.OwnerID != m.UserID || remote.LibraryID != m.LibraryID || remote.OriginalPath != remotePath) {
+			return current, errors.New("stored recipient asset identity mismatch")
+		}
+		if e == nil {
 			if e := r.FS.Ensure(asset.OriginalPath, path); e == nil {
 				return current, nil
 			}
@@ -399,14 +457,6 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 	}
 	if err := r.API.ScanLibrary(ctx, m); err != nil {
 		return current, fmt.Errorf("scan library: %w", err)
-	}
-	rel, err := filepath.Rel(r.C.BridgeRoot, path)
-	if err != nil {
-		return current, err
-	}
-	remotePath := filepath.Join(r.C.ImmichBridgeRoot, rel)
-	if !strings.HasPrefix(remotePath, r.C.ImmichBridgeRoot+string(filepath.Separator)) {
-		return current, errors.New("invalid remote bridge path")
 	}
 	foundAssets, err := r.API.FindByPath(ctx, m, remotePath)
 	if err != nil {
@@ -554,6 +604,67 @@ func (r *Reconciler) Check(ctx context.Context) error {
 		if id != m.UserID {
 			return fmt.Errorf("member %s API key belongs to %s", m.ID, id)
 		}
+		library, err := r.API.GetLibrary(ctx, m)
+		if err != nil {
+			return fmt.Errorf("member %s library: %w", m.ID, err)
+		}
+		expected := filepath.Join(r.C.ImmichBridgeRoot, "families", r.C.FamilyID, "users", m.ID, "assets")
+		if library.ID != m.LibraryID || library.OwnerID != m.UserID || len(library.ImportPaths) != 1 || library.ImportPaths[0] != expected {
+			return fmt.Errorf("member %s library identity or import path mismatch", m.ID)
+		}
 	}
 	return nil
+}
+
+func (r *Reconciler) mappedAsset(asset domain.Asset) (domain.Asset, error) {
+	path, err := r.C.SourcePath(asset.OriginalPath)
+	if err != nil {
+		return asset, err
+	}
+	asset.OriginalPath = path
+	return asset, nil
+}
+
+func (r *Reconciler) rebindOriginPath(logicalID, memberID, oldPath, newPath string) error {
+	newInfo, err := r.FS.SourceInfo(newPath)
+	if err != nil {
+		return err
+	}
+	anchored := false
+	oldInfo, err := r.FS.SourceInfo(oldPath)
+	if err == nil {
+		if !os.SameFile(oldInfo, newInfo) {
+			return errors.New("new source has a different inode")
+		}
+		anchored = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	replicas, err := r.DB.ReplicasFor(logicalID)
+	if err != nil {
+		return err
+	}
+	for _, rep := range replicas {
+		if rep.Role != "external_replica" || rep.Path == "" {
+			continue
+		}
+		info, err := os.Lstat(rep.Path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || !os.SameFile(info, newInfo) {
+			return errors.New("recipient link does not match moved source inode")
+		}
+		if err := r.FS.Ensure(newPath, rep.Path); err != nil {
+			return err
+		}
+		anchored = true
+	}
+	if !anchored {
+		return errors.New("cannot verify moved source inode from existing links")
+	}
+	return r.DB.UpdateOriginPath(logicalID, memberID, oldPath, newPath)
 }

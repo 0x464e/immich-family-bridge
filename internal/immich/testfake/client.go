@@ -1,4 +1,4 @@
-package fake
+package testfake
 
 import (
 	"context"
@@ -23,18 +23,32 @@ type State struct {
 	Albums     map[string]domain.Album    `json:"albums"`
 	Membership map[string]map[string]bool `json:"membership"`
 }
+
+// Seed is used only by unit tests. The running service never constructs this client.
+type Seed struct {
+	Assets []SeedAsset
+	Albums []SeedAlbum
+}
+type SeedAsset struct {
+	ID, Member, Path, Type string
+}
+type SeedAlbum struct {
+	ID, Member, Name, Description string
+	AssetIDs                      []string
+}
 type Client struct {
 	mu          sync.Mutex
 	config      config.Config
+	statePath   string
 	state       State
 	scanBlocked bool
 	failNext    bool
 }
 
-func New(c config.Config) (*Client, error) {
-	f := &Client{config: c, state: State{Assets: map[string]domain.Asset{}, Albums: map[string]domain.Album{}, Membership: map[string]map[string]bool{}}}
+func New(c config.Config, statePath string, data Seed) (*Client, error) {
+	f := &Client{config: c, statePath: statePath, state: State{Assets: map[string]domain.Asset{}, Albums: map[string]domain.Album{}, Membership: map[string]map[string]bool{}}}
 	seed := true
-	if b, err := os.ReadFile(c.FakeState); err == nil {
+	if b, err := os.ReadFile(statePath); err == nil {
 		if err := json.Unmarshal(b, &f.state); err != nil {
 			return nil, err
 		}
@@ -51,7 +65,7 @@ func New(c config.Config) (*Client, error) {
 	if f.state.Membership == nil {
 		f.state.Membership = map[string]map[string]bool{}
 	}
-	for _, a := range c.Fake.Assets {
+	for _, a := range data.Assets {
 		if !seed {
 			continue
 		}
@@ -65,7 +79,7 @@ func New(c config.Config) (*Client, error) {
 		}
 		f.state.Assets[a.ID] = domain.Asset{ID: a.ID, OwnerID: m.UserID, OriginalPath: a.Path, OriginalFileName: filepath.Base(a.Path), Type: typ}
 	}
-	for _, a := range c.Fake.Albums {
+	for _, a := range data.Albums {
 		m, _ := f.member(a.Member)
 		if seed {
 			f.state.Albums[a.ID] = domain.Album{ID: a.ID, OwnerID: m.UserID, Name: a.Name, Description: a.Description}
@@ -90,6 +104,17 @@ func (f *Client) DeleteAsset(id string) error {
 	}
 	return f.save()
 }
+func (f *Client) MoveAssetPath(id, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	asset, ok := f.state.Assets[id]
+	if !ok {
+		return immich.ErrNotFound
+	}
+	asset.OriginalPath = path
+	f.state.Assets[id] = asset
+	return f.save()
+}
 func (f *Client) member(id string) (domain.Member, bool) {
 	for _, m := range f.config.Members {
 		if m.ID == id {
@@ -99,18 +124,18 @@ func (f *Client) member(id string) (domain.Member, bool) {
 	return domain.Member{}, false
 }
 func (f *Client) save() error {
-	if err := os.MkdirAll(filepath.Dir(f.config.FakeState), 0750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(f.statePath), 0750); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(f.state, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := f.config.FakeState + ".tmp"
+	tmp := f.statePath + ".tmp"
 	if err := os.WriteFile(tmp, b, 0640); err != nil {
 		return err
 	}
-	return os.Rename(tmp, f.config.FakeState)
+	return os.Rename(tmp, f.statePath)
 }
 func (f *Client) fail() error {
 	if f.failNext {
@@ -129,6 +154,10 @@ func (f *Client) Me(_ context.Context, m domain.Member) (string, error) {
 		return "", err
 	}
 	return m.UserID, nil
+}
+func (f *Client) GetLibrary(_ context.Context, m domain.Member) (domain.Library, error) {
+	path := filepath.Join(f.config.ImmichBridgeRoot, "families", f.config.FamilyID, "users", m.ID, "assets")
+	return domain.Library{ID: m.LibraryID, OwnerID: m.UserID, ImportPaths: []string{path}}, nil
 }
 func (f *Client) GetAsset(_ context.Context, m domain.Member, id string) (domain.Asset, error) {
 	f.mu.Lock()

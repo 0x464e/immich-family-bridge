@@ -1,5 +1,9 @@
 .git
 testdata
+dist
+.idea
+.env
+*.private.env
 *.db
 *.db-shm
 *.db-wal
