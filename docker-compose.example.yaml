@@ -1,0 +1,62 @@
+# Example deployment for building this checkout locally. Copy or adapt it for
+# your host. Supply Compose variables from .env (copy .env.example), and keep
+# API keys in a separate private file named by BRIDGE_ENV_FILE.
+services:
+  # The bridge joins Immich's network to call its API and request library scans.
+  familybridge:
+    # Build the Dockerfile in this repository; run from the repository root.
+    build: .
+    # Local image name for this build. Replace with a pinned published image tag
+    # and remove build if deploying a release without building from source.
+    image: immich-family-bridge:local
+    # Run as the host UID:GID that can read originals and write state/recipients.
+    # Defaults to 1000:1000; set PUID and PGID in .env when needed.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    # Keep the container's own filesystem read-only; writable bind mounts below
+    # provide only the storage the application needs.
+    read_only: true
+    # Use a small init process to forward signals and reap child processes.
+    init: true
+    # Prevent the process from gaining additional privileges.
+    security_opt:
+      - no-new-privileges:true
+    # Load Immich API keys and the internal API token into the container. This
+    # path is set in .env; the referenced file must exist and stay private.
+    env_file:
+      - ${BRIDGE_ENV_FILE:?Set BRIDGE_ENV_FILE to a private env file}
+    # All paths on the left are absolute paths on the Docker host. Paths on the
+    # right are inside the bridge container and match config.example.yaml.
+    volumes:
+      # Read the bridge YAML configuration without allowing container edits.
+      - ${BRIDGE_CONFIG:?Set BRIDGE_CONFIG to a validated YAML config}:/etc/familybridge/config.yaml:ro
+      # Use one host media tree for sources and recipient hardlinks. Leave the
+      # mount read-only during dry runs; use rw only with dry_run: false after
+      # checking hardlink support, path mappings, and filesystem permissions.
+      - ${BRIDGE_MEDIA_ROOT:?Set BRIDGE_MEDIA_ROOT to the common media tree}:/media:${BRIDGE_MEDIA_MODE:-ro}
+      # Persist SQLite separately from media; this directory must be writable.
+      - ${BRIDGE_STATE_ROOT:?Set BRIDGE_STATE_ROOT to local state storage}:/state
+    # Connect to the existing Docker network used by the Immich server.
+    networks:
+      - immich
+    # Publish only on the Docker host's loopback address. BRIDGE_PORT selects
+    # the host port; 8080 is the bridge's listen port inside the container.
+    ports:
+      - "127.0.0.1:${BRIDGE_PORT:-8081}:8080"
+    # Docker checks HTTP process health here. /readyz provides the deeper
+    # SQLite and Immich readiness checks when you inspect the deployment.
+    healthcheck:
+      # Alpine's wget exits unsuccessfully when /healthz cannot be fetched.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      # Check every 30 seconds, allow 3 seconds, and mark unhealthy after 3
+      # consecutive failures. Adjust these if your host needs more time.
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+# This is an existing network from the Immich deployment, not a new network.
+networks:
+  immich:
+    # Compose must find the existing network by its exact Docker network name.
+    external: true
+    # Set IMMICH_NETWORK in .env, for example immich_default.
+    name: ${IMMICH_NETWORK:?Set IMMICH_NETWORK to the Immich Docker network}

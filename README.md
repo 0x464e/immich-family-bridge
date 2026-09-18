@@ -55,15 +55,15 @@ Test the actual deployment mount and UID/GID with a disposable source file befor
 
 1. Copy [config.example.yaml](config.example.yaml) to a private YAML file. Leave `dry_run: true` for the first deployment. Set `family_id`, the Immich API URL ending in `/api`, `source_root`, `source_mappings`, `bridge_root`, `immich_bridge_root`, the local SQLite path, and every member's bridge ID, Immich user ID, library ID, and key environment variable. Bridge IDs and the family ID become part of stable paths. The member set cannot be changed after database initialization without an explicit migration.
 2. Copy [secrets.env.example](secrets.env.example) to a private environment file. Supply the member keys, administrator key, and a random `FAMILYBRIDGE_API_TOKEN`. Keep both private files out of Git. API keys are not logged.
-3. Copy [compose.env.example](compose.env.example) to a private Compose environment file. Set absolute host paths, the Immich Docker network name, and `PUID`/`PGID` if the default `1000:1000` cannot read sources and write recipient files and SQLite state. Leave `BRIDGE_MEDIA_MODE=ro` for the dry run.
+3. Copy [.env.example](.env.example) to `.env` in this repository, or to another private Compose environment file. Set absolute host paths, the Immich Docker network name, and `PUID`/`PGID` if the default `1000:1000` cannot read sources and write recipient files and SQLite state. Leave `BRIDGE_MEDIA_MODE=ro` for the dry run. This file supplies Compose paths and options; the API keys belong in the separate file named by `BRIDGE_ENV_FILE`.
 4. Start the service from this repository:
 
    ~~~sh
-   docker compose --env-file /absolute/path/to/bridge-compose.env up --build -d
+   docker compose --env-file .env -f docker-compose.example.yaml up --build -d
    curl --fail-with-body http://127.0.0.1:8081/readyz
    ~~~
 
-The supplied [compose.yaml](compose.yaml) builds the checked-out source and binds the bridge API to `127.0.0.1:8081`. To run a published release, use `0x464e/immich-family-bridge:<release-version>` in your own Compose deployment instead of the local `build` directive. Pin a version tag for repeatable deployments.
+The supplied [docker-compose.example.yaml](docker-compose.example.yaml) builds the checked-out source and binds the bridge API to `127.0.0.1:8081`. Pass `-f docker-compose.example.yaml` explicitly because an example file is not loaded automatically. To run a published release, use `0x464e/immich-family-bridge:<release-version>` in your own Compose deployment instead of the local `build` directive. Pin a version tag for repeatable deployments.
 
 `GET /healthz` reports whether the HTTP process responds. `GET /readyz` also checks SQLite, Immich reachability, member-key identity, and each recipient library's owner and import path. The service will not start if initial identity checks fail.
 
