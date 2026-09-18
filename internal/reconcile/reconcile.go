@@ -28,6 +28,7 @@ type Reconciler struct {
 }
 
 var ErrDryRunMode = errors.New("dry-run mode enabled; proposed actions are reported in the service logs")
+var errPendingImport = errors.New("waiting for Immich library import")
 
 func New(c config.Config, db *store.Store, api immich.Client, log *slog.Logger) *Reconciler {
 	return &Reconciler{C: c, DB: db, API: api, FS: filesystem.Linker{SourceRoot: c.SourceRoot, BridgeRoot: c.BridgeRoot, ReadOnly: c.DryRun}, Log: log}
@@ -434,6 +435,10 @@ func (r *Reconciler) runAlbum(ctx context.Context, a domain.LogicalAlbum) error 
 		for logicalID := range desired {
 			rep, err := r.ensureReplica(ctx, logicalID, o.member)
 			if err != nil {
+				if errors.Is(err, errPendingImport) {
+					r.Log.Info("asset waiting for Immich library import", "logical_asset_id", logicalID, "member_id", o.member.ID, "state", "pending_import")
+					continue
+				}
 				r.Log.Warn("asset replica pending", "logical_asset_id", logicalID, "member_id", o.member.ID, "error", err)
 				continue
 			}
@@ -601,8 +606,11 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 	if err != nil {
 		return current, err
 	}
+	if len(foundAssets) == 0 {
+		return current, errPendingImport
+	}
 	if len(foundAssets) != 1 {
-		return current, fmt.Errorf("pending import: expected one matching asset, got %d", len(foundAssets))
+		return current, fmt.Errorf("expected one imported asset at %s, got %d", remotePath, len(foundAssets))
 	}
 	if foundAssets[0].OwnerID != m.UserID || foundAssets[0].LibraryID != m.LibraryID || foundAssets[0].OriginalPath != remotePath {
 		return current, errors.New("imported asset identity mismatch")
@@ -610,7 +618,11 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 	current.AssetID = foundAssets[0].ID
 	current.State = "ready"
 	current.Error = ""
-	return current, r.DB.UpsertReplica(current)
+	if err := r.DB.UpsertReplica(current); err != nil {
+		return current, err
+	}
+	r.Log.Info("asset replica ready", "logical_asset_id", logicalID, "member_id", m.ID, "immich_asset_id", current.AssetID)
+	return current, nil
 }
 
 type Action struct {

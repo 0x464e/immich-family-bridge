@@ -1,12 +1,14 @@
 package reconcile
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/0x464e/immich-family-bridge/internal/config"
@@ -320,6 +322,8 @@ func TestNUserAlbumFlowRestartAndReferences(t *testing.T) {
 	}
 	tripReps, _ := db.AlbumReplicas(trip)
 	api.BlockScans(true)
+	var pendingLogs bytes.Buffer
+	r.Log = slog.New(slog.NewJSONHandler(&pendingLogs, nil))
 	if e := api.AddAssets(ctx, c.Members[1], tripReps["bob"], []string{"b1"}); e != nil {
 		t.Fatal(e)
 	}
@@ -333,6 +337,9 @@ func TestNUserAlbumFlowRestartAndReferences(t *testing.T) {
 	br, ok, _ := db.Replica(blid, "carol")
 	if !ok || br.State != "pending_import" {
 		t.Fatalf("want pending import: %+v", br)
+	}
+	if got := pendingLogs.String(); !strings.Contains(got, `"state":"pending_import"`) || strings.Contains(got, `"level":"WARN"`) || strings.Contains(got, `"error":`) {
+		t.Fatalf("expected import wait to be informational: %s", got)
 	}
 	api.BlockScans(false)
 	if e := r.Run(ctx); e != nil {
