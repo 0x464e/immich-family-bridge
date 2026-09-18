@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/0x464e/immich-family-bridge/compare/v0.4.0...v0.4.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* provision configured Together albums automatically ([544ba37](https://github.com/0x464e/immich-family-bridge/commit/544ba3741bd5c5b64b74efb90b54a0df31f764dd))
+
 ## [0.4.0](https://github.com/0x464e/immich-family-bridge/compare/v0.3.0...v0.4.0) (2026-09-18)
 
 
