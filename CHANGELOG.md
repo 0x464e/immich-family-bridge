@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/0x464e/immich-family-bridge/compare/v0.2.0...v0.3.0) (2026-09-18)
+
+
+### Features
+
+* log continuous dry-run previews ([95d8b66](https://github.com/0x464e/immich-family-bridge/commit/95d8b66084d076e5c7641ac23e1ccc39e8cc1293))
+
 ## [0.2.0](https://github.com/0x464e/immich-family-bridge/compare/v0.1.0...v0.2.0) (2026-09-18)
 
 
