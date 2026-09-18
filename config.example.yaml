@@ -1,30 +1,97 @@
+# Stable identifier for this family. Use letters, digits, underscores, or hyphens;
+# start with a letter or digit. It becomes part of recipient paths and database
+# mappings, so keep it unchanged after the bridge has created replicas.
 family_id: my-family
-dry_run: true # Set to false only after reviewing a production dry run.
+
+# Preview reconciliation without writing files or changing Immich. The bridge
+# still writes its own SQLite state (for example, registered albums). Start with
+# true; set false only after reviewing the proposed operations and mount layout.
+dry_run: true
+
+# Immich API base URL as reached from the bridge container. Include the /api
+# suffix. A Compose service name works when both containers share a network.
 immich_url: http://immich-server:2283/api
+
+# Name of an environment variable containing an Immich administrator API key.
+# The bridge uses it to inspect recipient libraries and request library scans.
+# Give that key library.read and library.update permissions. Set the secret in
+# the container environment; never put the key in this file.
 admin_key_env: IMMICH_LIBRARY_ADMIN_KEY
 
-# All media roots below are paths inside the bridge container. Mount one
-# filesystem tree at /media so hardlinks cross no container mount boundary.
+# Absolute path to the common media tree inside the bridge container. It must
+# exist and contain the mapped source directories. Mount sources and recipients
+# through one hardlink-capable filesystem mount; separate bind mounts can cause
+# EXDEV even when their host paths are on the same filesystem.
 source_root: /media
+
+# Translate Immich originalPath values into paths visible to the bridge. Add one
+# entry per source tree whose assets may be shared; remove unused example entries.
+# Each immich_root must be a distinct, nonoverlapping absolute path in Immich.
+# Each local_root must point to the SAME files inside the bridge container, below
+# source_root and outside bridge_root. The relative path after immich_root is
+# appended to local_root (for example, /data/a.jpg -> /media/immich-upload/a.jpg).
 source_mappings:
+  # Original asset path prefix reported by Immich for its upload storage.
   - immich_root: /data
+    # Corresponding directory in the bridge container, with originals readable.
     local_root: /media/immich-upload
+  # Example second source tree, such as an Immich External Library mount.
   - immich_root: /external-sources
+    # Same files as /external-sources, viewed from the bridge container.
     local_root: /media/external-sources
+
+# Absolute destination directory for recipient hardlinks inside the bridge
+# container. Place it in the common filesystem tree, away from source mappings.
+# The bridge needs write access here; it never modifies source originals.
 bridge_root: /media/bridge-recipients
+
+# Absolute path to that SAME recipient directory inside the Immich container.
+# Mount it into Immich for reading. Each member's dedicated External Library
+# must import its own path beneath this root:
+# <root>/families/<family_id>/users/<member_id>/assets
 immich_bridge_root: /bridge-recipients
 
+# Absolute path to the SQLite state file. Keep it on persistent, writable local
+# storage outside the media and recipient trees; dry runs also update this file.
 database: /state/bridge.sqlite
+
+# HTTP bind address and port inside the bridge container. 0.0.0.0 permits a
+# container port mapping; publish that port only to trusted hosts or localhost.
+# Omitting this field defaults to 127.0.0.1:8080.
 listen: 0.0.0.0:8080
+
+# Name of an environment variable containing a random bearer token for the
+# bridge's internal API. Required even in dry-run mode. Set the token in the
+# container environment, not in this file.
 api_token_env: FAMILYBRIDGE_API_TOKEN
+
+# Time between reconciliation polls, in Go duration syntax (such as 30s or 5m).
+# Must be at least 1s. The default is 30s when omitted.
 poll_interval: 30s
 
+# Family members to synchronize; configure at least two. Give each person a
+# distinct bridge ID, Immich user ID, recipient library ID, and API key. Keep
+# this membership and the IDs stable after initialization; changing them needs
+# a state migration. Repeat the same four fields for additional members.
 members:
+  # Stable, path-safe bridge ID for this member; it is not an email or user UUID.
   - id: alice
+    # Immich user UUID that owns this account and its recipient library.
     user_id: replace-with-alice-immich-user-id
+    # UUID of this user's dedicated recipient External Library. Set that
+    # library's import path to <immich_bridge_root>/families/<family_id>/users/<id>/assets.
     library_id: replace-with-alice-recipient-library-id
+    # Environment variable holding this user's Immich API key. The bridge checks
+    # that the key belongs to user_id. Give it user.read, asset.read,
+    # assetFile.read, album.create, album.read, album.update,
+    # albumAsset.create, and albumAsset.delete permissions. Never put the key
+    # itself in this file.
     key_env: IMMICH_MEMBER_ALICE_KEY
+  # Another member; use a different stable ID, user, library, and key variable.
   - id: bob
+    # Immich UUID of the second member.
     user_id: replace-with-bob-immich-user-id
+    # UUID of the second member's dedicated recipient External Library.
     library_id: replace-with-bob-recipient-library-id
+    # Environment variable holding the second member's Immich API key.
     key_env: IMMICH_MEMBER_BOB_KEY
