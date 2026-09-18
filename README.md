@@ -116,6 +116,8 @@ The `PATCH` body should include the complete desired name and description; an om
 
 Expect `pending_import` for a while after a scan; later polls retry the lookup even if Immich's thumbnail and machine-learning jobs are still queued. The bridge prepares up to 500 new replicas, looks up up to 500 pending imports, and audits up to 200 ready replicas per member and album per cycle. It requests at most one recipient library scan per member every 90 seconds and adds album assets in batches of 100. Inspect `GET /api/replicas`, `GET /api/filesystem`, and the JSON container logs when an asset does not appear. A temporarily unavailable Immich API makes `/readyz` return 503. The bridge retains SQLite state and resumes on later cycles.
 
+After a process crash or host reboot, the container's restart policy starts the bridge again. Its SQLite database uses WAL mode with full commit synchronization; incomplete transactions roll back. Reconciliation retries persisted `pending_link` and `pending_import` records, accepts a hardlink that already points to the correct source, and checks each imported asset's owner, library, and path before reusing it. Keep the SQLite state volume and originals available across restarts. If either is lost or damaged, recovery needs manual investigation and a backup.
+
 ## Current limits and production pilot
 
 - Only ordinary single-file images and videos are modeled. Live Photos, motion photos, stacks, sidecars, edits, and other coupled forms are marked `unsupported`. Ordinary JPEGs have live end-to-end validation; videos still need a live trial.

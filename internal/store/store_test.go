@@ -14,6 +14,10 @@ func TestPersistenceAndMigrations(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	var synchronous int
+	if e := s.DB.QueryRow(`PRAGMA synchronous`).Scan(&synchronous); e != nil || synchronous != 2 {
+		t.Fatalf("SQLite synchronous mode = %d, want FULL (2): %v", synchronous, e)
+	}
 	members := []domain.Member{{ID: "a", UserID: "u-a", LibraryID: "l-a"}, {ID: "b", UserID: "u-b", LibraryID: "l-b"}}
 	if e := s.Init("family", members); e != nil {
 		t.Fatal(e)
