@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/0x464e/immich-family-bridge/compare/v0.3.0...v0.4.0) (2026-09-18)
+
+
+### Features
+
+* move bridge HTTP port to 6773 ([5d8c9bc](https://github.com/0x464e/immich-family-bridge/commit/5d8c9bc61aabd96eb2827fa7541c859009250551))
+
 ## [0.3.0](https://github.com/0x464e/immich-family-bridge/compare/v0.2.0...v0.3.0) (2026-09-18)
 
 
