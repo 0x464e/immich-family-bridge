@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -189,29 +190,49 @@ func (c *Client) ListAlbums(ctx context.Context, m domain.Member) ([]domain.Albu
 func (c *Client) search(ctx context.Context, m domain.Member, filter map[string]any) ([]domain.Asset, error) {
 	out := []domain.Asset{}
 	cursor := ""
+	page := 1
+	seen := map[string]bool{}
 	for pages := 0; pages < 10000; pages++ {
 		if cursor != "" {
 			filter["cursor"] = cursor
+			delete(filter, "page")
+		} else {
+			filter["page"] = page
 		}
 		var v struct {
 			Assets struct {
 				Items      []assetDTO `json:"items"`
 				NextCursor *string    `json:"nextCursor"`
+				NextPage   *string    `json:"nextPage"`
 			} `json:"assets"`
 		}
 		if err := c.request(ctx, m.Key, "POST", "/search/metadata", filter, &v); err != nil {
 			return nil, err
 		}
 		for _, a := range v.Assets.Items {
+			if seen[a.ID] {
+				return nil, fmt.Errorf("immich search returned asset %s on multiple pages", a.ID)
+			}
+			seen[a.ID] = true
 			out = append(out, a.domain())
 		}
-		if v.Assets.NextCursor == nil || *v.Assets.NextCursor == "" {
-			return out, nil
+		if v.Assets.NextCursor != nil && *v.Assets.NextCursor != "" {
+			if *v.Assets.NextCursor == cursor {
+				return nil, errors.New("immich search cursor did not advance")
+			}
+			cursor = *v.Assets.NextCursor
+			continue
 		}
-		if *v.Assets.NextCursor == cursor {
-			return nil, errors.New("immich search cursor did not advance")
+		if v.Assets.NextPage != nil && *v.Assets.NextPage != "" {
+			next, err := strconv.Atoi(*v.Assets.NextPage)
+			if err != nil || next <= page {
+				return nil, fmt.Errorf("immich search page did not advance: %q", *v.Assets.NextPage)
+			}
+			page = next
+			cursor = ""
+			continue
 		}
-		cursor = *v.Assets.NextCursor
+		return out, nil
 	}
 	return nil, errors.New("immich search page limit exceeded")
 }

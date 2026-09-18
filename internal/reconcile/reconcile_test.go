@@ -4,18 +4,164 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0x464e/immich-family-bridge/internal/config"
 	"github.com/0x464e/immich-family-bridge/internal/domain"
+	"github.com/0x464e/immich-family-bridge/internal/immich"
 	fake "github.com/0x464e/immich-family-bridge/internal/immich/testfake"
 	"github.com/0x464e/immich-family-bridge/internal/store"
 )
+
+type measuringClient struct {
+	immich.Client
+	scans    map[string]int
+	addSizes []int
+}
+
+type cancelingClient struct {
+	immich.Client
+	cancel context.CancelFunc
+}
+
+func (c cancelingClient) GetAsset(ctx context.Context, member domain.Member, id string) (domain.Asset, error) {
+	c.cancel()
+	return domain.Asset{}, ctx.Err()
+}
+
+func TestCanceledCycleDoesNotWarnOrCorruptMappings(t *testing.T) {
+	c, db, api, r := setup(t)
+	ctx := context.Background()
+	if _, err := r.Register(ctx, "alice", "trip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cycleCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var output bytes.Buffer
+	interrupted := New(c, db, cancelingClient{Client: api, cancel: cancel}, slog.New(slog.NewJSONHandler(&output, nil)))
+	if err := interrupted.Run(cycleCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want canceled cycle, got %v", err)
+	}
+	if strings.Contains(output.String(), `"level":"WARN"`) || strings.Contains(output.String(), `"level":"ERROR"`) {
+		t.Fatalf("shutdown cancellation produced warnings: %s", output.String())
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatalf("cycle after interruption: %v", err)
+	}
+}
+
+func (m *measuringClient) ScanLibrary(ctx context.Context, member domain.Member) error {
+	m.scans[member.ID]++
+	return m.Client.ScanLibrary(ctx, member)
+}
+
+func (m *measuringClient) AddAssets(ctx context.Context, member domain.Member, albumID string, ids []string) error {
+	m.addSizes = append(m.addSizes, len(ids))
+	return m.Client.AddAssets(ctx, member, albumID, ids)
+}
+
+func TestLargeDelayedImportUsesBoundedWorkAndCoalescedScans(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.MkdirAll(source, 0750); err != nil {
+		t.Fatal(err)
+	}
+	members := []domain.Member{{ID: "alice", UserID: "user-a", LibraryID: "lib-a"}, {ID: "bob", UserID: "user-b", LibraryID: "lib-b"}, {ID: "carol", UserID: "user-c", LibraryID: "lib-c"}}
+	c := config.Config{FamilyID: "load", SourceRoot: source, SourceMappings: []config.SourceMapping{{ImmichRoot: source, LocalRoot: source}}, BridgeRoot: filepath.Join(root, "bridge"), ImmichBridgeRoot: "/bridge", Database: filepath.Join(root, "state", "bridge.sqlite"), Members: members}
+	seed := fake.Seed{Albums: []fake.SeedAlbum{{ID: "load-album", Member: "alice", Name: "Load"}}}
+	for i := 0; i < 520; i++ {
+		id := fmt.Sprintf("source-%04d", i)
+		path := filepath.Join(source, id+".jpg")
+		if err := os.WriteFile(path, []byte(id), 0640); err != nil {
+			t.Fatal(err)
+		}
+		seed.Assets = append(seed.Assets, fake.SeedAsset{ID: id, Member: "alice", Path: path})
+		seed.Albums[0].AssetIDs = append(seed.Albums[0].AssetIDs, id)
+	}
+	db, err := store.Open(c.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Init(c.FamilyID, c.Members); err != nil {
+		t.Fatal(err)
+	}
+	api, err := fake.New(c, filepath.Join(root, "fake.json"), seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.BlockScans(true)
+	measured := &measuringClient{Client: api, scans: map[string]int{}}
+	r := New(c, db, measured, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	clock := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return clock }
+	ctx := context.Background()
+	albumID, err := r.Register(ctx, "alice", "load-album")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := r.Run(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if measured.scans["bob"] != 1 || measured.scans["carol"] != 1 {
+		t.Fatalf("expected one scan per recipient during backlog: %+v", measured.scans)
+	}
+	replicas, err := db.Replicas()
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]int{}
+	for _, rep := range replicas {
+		states[rep.State]++
+	}
+	if states["pending_import"] != 1040 || states["ready"] != 520 {
+		t.Fatalf("bounded preparation did not cover 520 assets: %+v", states)
+	}
+	api.BlockScans(false)
+	clock = clock.Add(2 * time.Minute)
+	for i := 0; i < 3; i++ {
+		if err := r.Run(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if measured.scans["bob"] != 2 || measured.scans["carol"] != 2 {
+		t.Fatalf("expected a single retry scan per recipient: %+v", measured.scans)
+	}
+	for _, member := range members {
+		albumReps, err := db.AlbumReplicas(albumID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assets, err := api.ListAlbumAssets(ctx, member, albumReps[member.ID])
+		if err != nil || len(assets) != 520 {
+			t.Fatalf("member %s has %d assets: %v", member.ID, len(assets), err)
+		}
+	}
+	batched := false
+	for _, size := range measured.addSizes {
+		if size > albumBatchSize {
+			t.Fatalf("album add exceeded batch size: %d", size)
+		}
+		if size > 1 {
+			batched = true
+		}
+	}
+	if !batched {
+		t.Fatal("album additions were not batched")
+	}
+}
 
 func TestPersistentDryRunDoesNotWriteImmichOrMedia(t *testing.T) {
 	c, db, api, _ := setup(t)
@@ -338,10 +484,11 @@ func TestNUserAlbumFlowRestartAndReferences(t *testing.T) {
 	if !ok || br.State != "pending_import" {
 		t.Fatalf("want pending import: %+v", br)
 	}
-	if got := pendingLogs.String(); !strings.Contains(got, `"state":"pending_import"`) || strings.Contains(got, `"level":"WARN"`) || strings.Contains(got, `"error":`) {
+	if got := pendingLogs.String(); !strings.Contains(got, `"pending_import":1`) || strings.Contains(got, `"level":"WARN"`) || strings.Contains(got, `"error":`) {
 		t.Fatalf("expected import wait to be informational: %s", got)
 	}
 	api.BlockScans(false)
+	r.scanInterval = 0
 	if e := r.Run(ctx); e != nil {
 		t.Fatal(e)
 	}
