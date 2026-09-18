@@ -9,5 +9,5 @@ FROM alpine:3.22
 RUN addgroup -g 1000 familybridge && adduser -D -H -u 1000 -G familybridge familybridge
 COPY --from=build /out/familybridge /usr/local/bin/familybridge
 USER familybridge
-EXPOSE 8080
+EXPOSE 6773
 ENTRYPOINT ["/usr/local/bin/familybridge"]

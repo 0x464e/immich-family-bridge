@@ -5,5 +5,5 @@ ARG TARGETPLATFORM
 COPY $TARGETPLATFORM/familybridge /usr/local/bin/familybridge
 
 USER familybridge
-EXPOSE 8080
+EXPOSE 6773
 ENTRYPOINT ["/usr/local/bin/familybridge"]

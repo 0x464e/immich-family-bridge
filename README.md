@@ -60,16 +60,16 @@ Test the actual deployment mount and UID/GID with a disposable source file befor
 
    ~~~sh
    docker compose --env-file .env up -d
-   curl --fail-with-body http://127.0.0.1:8081/readyz
+   curl --fail-with-body http://127.0.0.1:6773/readyz
    ~~~
 
-The example uses the published `0x464e/immich-family-bridge:latest` image from Docker Hub and binds the bridge API to `127.0.0.1:8081`. Its `pull_policy: always` checks for a newer image when you recreate the service. Replace `latest` with a specific release tag when you want predictable upgrades.
+The example uses the published `0x464e/immich-family-bridge:latest` image from Docker Hub and binds the bridge API to `127.0.0.1:6773`. Its `pull_policy: always` checks for a newer image when you recreate the service. Replace `latest` with a specific release tag when you want predictable upgrades.
 
 `GET /healthz` reports whether the HTTP process responds. `GET /readyz` also checks SQLite, Immich reachability, member-key identity, and each recipient library's owner and import path. The service will not start if initial identity checks fail.
 
 ### Start with persistent dry-run mode
 
-`FAMILYBRIDGE_DRY_RUN=true` is the default when the environment variable is omitted. The supplied Compose file also mounts the media tree read-only by default. The service stays running: it previews once at startup and on every `poll_interval` (30 seconds by default), logging each proposed action with the album, member, and asset IDs, followed by an action count. Watch it with `docker compose logs -f familybridge` or the container logs in your deployment UI. For example, a new asset produces a “new source asset found” entry and a “would share asset with member through hardlink and import” entry for each recipient. The same actions can appear on later polls because dry-run deliberately does not complete them. With no registered albums, the cycle reports zero actions.
+`FAMILYBRIDGE_DRY_RUN=true` is the default when the environment variable is omitted. The supplied Compose file also mounts the media tree read-only by default. The service stays running: it previews once at startup and on every `poll_interval` (30 seconds by default), logging each proposed action with the album, member, and asset IDs, followed by an action count. Watch it with `docker compose logs -f family-bridge` or the container logs in your deployment UI. For example, a new asset produces a “new source asset found” entry and a “would share asset with member through hardlink and import” entry for each recipient. The same actions can appear on later polls because dry-run deliberately does not complete them. With no registered albums, the cycle reports zero actions.
 
 Dry-run does not create albums, add or remove Immich album assets, scan libraries, or create hardlinks. `POST /api/reconcile` returns HTTP 409, and the HTTP adapter and filesystem linker independently reject writes. Registering an album still writes its mapping to the bridge's **local SQLite database** so it can be previewed and used after activation. Updating canonical album metadata through the bridge API also writes only to SQLite until activation. The separate one-shot dry-run HTTP endpoint has been removed; logs are the normal way to inspect the continuous preview.
 
@@ -83,19 +83,19 @@ The internal API requires `Authorization: Bearer <FAMILYBRIDGE_API_TOKEN>` for e
 # Set BRIDGE_TOKEN to the private token from your secrets file.
 curl --fail-with-body -sS \
   -H "Authorization: Bearer $BRIDGE_TOKEN" \
-  http://127.0.0.1:8081/api/status
+  http://127.0.0.1:6773/api/status
 
 curl --fail-with-body -sS \
   -H "Authorization: Bearer $BRIDGE_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"memberId":"alice","albumId":"<alice-immich-album-id>"}' \
-  http://127.0.0.1:8081/api/albums
+  http://127.0.0.1:6773/api/albums
 
 # Dry-run previews appear continuously in the service logs. Run this manual
 # reconciliation command only after activating the service.
 curl --fail-with-body -sS -X POST \
   -H "Authorization: Bearer $BRIDGE_TOKEN" \
-  http://127.0.0.1:8081/api/reconcile
+  http://127.0.0.1:6773/api/reconcile
 ~~~
 
 `POST /api/albums` also accepts `"replicas":{"bob":"<bob-album-id>"}` to attach existing albums for other members. The first reconciliation includes the union of their member-owned assets. Register each logical album you want bridged, including a catch-all “Together” album if desired. Albums are not discovered automatically.

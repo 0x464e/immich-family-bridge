@@ -73,6 +73,9 @@ members:
 			if err != nil || c.DryRun != tc.want {
 				t.Fatalf("DryRun=%v, err=%v, want %v", c.DryRun, err, tc.want)
 			}
+			if c.Listen != "127.0.0.1:6773" {
+				t.Fatalf("Listen=%q, want default 127.0.0.1:6773", c.Listen)
+			}
 		})
 	}
 	if err := os.WriteFile(path, []byte("dry_run: false\n"+base), 0600); err != nil {
