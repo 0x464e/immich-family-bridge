@@ -19,7 +19,7 @@ func TestHardlinkIdentityAndUnlink(t *testing.T) {
 	if err := os.WriteFile(source, []byte("fake jpeg bytes"), 0640); err != nil {
 		t.Fatal(err)
 	}
-	l := Linker{srcRoot, dstRoot}
+	l := Linker{SourceRoot: srcRoot, BridgeRoot: dstRoot}
 	dest, e := l.Destination("fam", "bob", "alice", "asset-1", source)
 	if e != nil {
 		t.Fatal(e)
@@ -68,7 +68,7 @@ func TestCrossFilesystem(t *testing.T) {
 	if a.Sys().(*syscall.Stat_t).Dev == b.Sys().(*syscall.Stat_t).Dev {
 		t.Skip("same filesystem")
 	}
-	l := Linker{srcRoot, other}
+	l := Linker{SourceRoot: srcRoot, BridgeRoot: other}
 	e := l.Ensure(src, filepath.Join(other, "a.jpg"))
 	if !errors.Is(e, ErrCrossFilesystem) {
 		t.Fatalf("wanted EXDEV, got %v", e)
@@ -84,7 +84,23 @@ func TestRejectSymlink(t *testing.T) {
 	_ = os.WriteFile(real, []byte("x"), 0640)
 	link := filepath.Join(src, "link.jpg")
 	_ = os.Symlink(real, link)
-	if err := (Linker{src, dst}).Ensure(link, filepath.Join(dst, "link.jpg")); err == nil {
+	if err := (Linker{SourceRoot: src, BridgeRoot: dst}).Ensure(link, filepath.Join(dst, "link.jpg")); err == nil {
 		t.Fatal("symlink accepted")
+	}
+}
+
+func TestReadOnlyLinkerRejectsLinkBeforeCreatingDirectories(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source.jpg")
+	if err := os.WriteFile(source, []byte("image"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	bridge := filepath.Join(root, "bridge")
+	l := Linker{SourceRoot: root, BridgeRoot: bridge, ReadOnly: true}
+	if err := l.Ensure(source, filepath.Join(bridge, "photo.jpg")); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("read-only linker returned %v", err)
+	}
+	if _, err := os.Stat(bridge); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only linker created directory: %v", err)
 	}
 }

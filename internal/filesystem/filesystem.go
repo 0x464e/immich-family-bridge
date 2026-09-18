@@ -11,8 +11,12 @@ import (
 
 var ErrCrossFilesystem = errors.New("hardlink crosses filesystem or mount boundary")
 var ErrConflict = errors.New("recipient path already refers to different file")
+var ErrReadOnly = errors.New("dry-run mode blocks hardlink creation")
 
-type Linker struct{ SourceRoot, BridgeRoot string }
+type Linker struct {
+	SourceRoot, BridgeRoot string
+	ReadOnly               bool
+}
 
 func within(root, p string) bool {
 	r, e := filepath.Rel(root, p)
@@ -50,6 +54,9 @@ func (l Linker) Destination(family, member, originMember, originAsset, source st
 }
 
 func (l Linker) Ensure(source, dest string) error {
+	if l.ReadOnly {
+		return ErrReadOnly
+	}
 	if !within(l.BridgeRoot, dest) {
 		return errors.New("link path outside configured root")
 	}

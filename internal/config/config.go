@@ -21,6 +21,7 @@ type SourceMapping struct {
 
 type Config struct {
 	FamilyID         string          `yaml:"family_id"`
+	DryRun           bool            `yaml:"dry_run"`
 	ImmichURL        string          `yaml:"immich_url"`
 	AdminKeyEnv      string          `yaml:"admin_key_env"`
 	AdminKey         string          `yaml:"-"`
@@ -43,7 +44,7 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	var c Config
+	c := Config{DryRun: true}
 	dec := yaml.NewDecoder(strings.NewReader(string(b)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {

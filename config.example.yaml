@@ -1,4 +1,5 @@
 family_id: my-family
+dry_run: true # Set to false only after reviewing a production dry run.
 immich_url: http://immich-server:2283/api
 admin_key_env: IMMICH_LIBRARY_ADMIN_KEY
 

@@ -1,12 +1,60 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/0x464e/immich-family-bridge/internal/domain"
 )
+
+func TestLoadDefaultsToDryRun(t *testing.T) {
+	media := t.TempDir()
+	upload := filepath.Join(media, "upload")
+	if err := os.Mkdir(upload, 0750); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"TEST_ADMIN_KEY", "TEST_API_TOKEN", "TEST_ALICE_KEY", "TEST_BOB_KEY"} {
+		t.Setenv(name, "test-secret")
+	}
+	base := fmt.Sprintf(`family_id: family
+immich_url: http://immich-server:2283/api
+admin_key_env: TEST_ADMIN_KEY
+source_root: %s
+source_mappings:
+  - immich_root: /data
+    local_root: %s
+bridge_root: %s
+immich_bridge_root: /bridge
+database: %s
+api_token_env: TEST_API_TOKEN
+members:
+  - id: alice
+    user_id: u-alice
+    library_id: l-alice
+    key_env: TEST_ALICE_KEY
+  - id: bob
+    user_id: u-bob
+    library_id: l-bob
+    key_env: TEST_BOB_KEY
+`, media, upload, filepath.Join(media, "bridge"), filepath.Join(t.TempDir(), "bridge.sqlite"))
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	for _, tc := range []struct {
+		name, text string
+		want       bool
+	}{{"omitted", base, true}, {"explicit false", "dry_run: false\n" + base, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.text), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(path)
+			if err != nil || c.DryRun != tc.want {
+				t.Fatalf("dry_run=%v, err=%v, want %v", c.DryRun, err, tc.want)
+			}
+		})
+	}
+}
 
 func TestSourceMappingsAndValidation(t *testing.T) {
 	media := t.TempDir()
