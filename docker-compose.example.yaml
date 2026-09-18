@@ -3,7 +3,7 @@
 # config YAML, and API keys in a private file named by BRIDGE_ENV_FILE.
 services:
   # The bridge joins Immich's network to call its API and request library scans.
-  familybridge:
+  family-bridge:
     # Published multi-architecture image. The latest tag follows new releases;
     # replace it with a version tag if you need to control upgrade timing.
     image: 0x464e/immich-family-bridge:latest
@@ -45,14 +45,14 @@ services:
     networks:
       - immich
     # Publish only on the Docker host's loopback address. BRIDGE_PORT selects
-    # the host port; 8080 is the bridge's listen port inside the container.
+    # the host port; 6773 is the bridge's listen port inside the container.
     ports:
-      - "127.0.0.1:${BRIDGE_PORT:-8081}:8080"
+      - "127.0.0.1:${BRIDGE_PORT:-6773}:6773"
     # Docker checks HTTP process health here. /readyz provides the deeper
     # SQLite and Immich readiness checks when you inspect the deployment.
     healthcheck:
       # Alpine's wget exits unsuccessfully when /healthz cannot be fetched.
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:6773/healthz"]
       # Check every 30 seconds, allow 3 seconds, and mark unhealthy after 3
       # consecutive failures. Adjust these if your host needs more time.
       interval: 30s

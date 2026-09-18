@@ -58,7 +58,7 @@ func Load(path string) (Config, error) {
 		}
 	}
 	if c.Listen == "" {
-		c.Listen = "127.0.0.1:8080"
+		c.Listen = "127.0.0.1:6773"
 	}
 	if c.PollInterval == "" {
 		c.PollInterval = "30s"

@@ -52,8 +52,8 @@ database: /state/bridge.sqlite
 
 # HTTP bind address and port inside the bridge container. 0.0.0.0 permits a
 # container port mapping; publish that port only to trusted hosts or localhost.
-# Omitting this field defaults to 127.0.0.1:8080.
-listen: 0.0.0.0:8080
+# Omitting this field defaults to 127.0.0.1:6773.
+listen: 0.0.0.0:6773
 
 # Name of an environment variable containing a random bearer token for the
 # bridge's internal API. Required even in dry-run mode. Set the token in the
