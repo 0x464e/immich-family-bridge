@@ -9,6 +9,8 @@ services:
     image: 0x464e/immich-family-bridge:latest
     # Fetch the current image when this service is created or updated.
     pull_policy: always
+    # Restart the long-running polling service after host or process restarts.
+    restart: unless-stopped
     # Run as the host UID:GID that can read originals and write state/recipients.
     # Defaults to 1000:1000; set PUID and PGID in .env when needed.
     user: "${PUID:-1000}:${PGID:-1000}"
@@ -24,13 +26,17 @@ services:
     # path is set in .env; the referenced file must exist and stay private.
     env_file:
       - ${BRIDGE_ENV_FILE:?Set BRIDGE_ENV_FILE to a private env file}
+    # Keep the service running in preview mode by default. Set this to false
+    # only when the media mount is rw and you are ready for Immich/file writes.
+    environment:
+      FAMILYBRIDGE_DRY_RUN: ${FAMILYBRIDGE_DRY_RUN:-true}
     # All paths on the left are absolute paths on the Docker host. Paths on the
     # right are inside the bridge container and match config.example.yaml.
     volumes:
       # Read the bridge YAML configuration without allowing container edits.
       - ${BRIDGE_CONFIG:?Set BRIDGE_CONFIG to a validated YAML config}:/etc/familybridge/config.yaml:ro
       # Use one host media tree for sources and recipient hardlinks. Leave the
-      # mount read-only during dry runs; use rw only with dry_run: false after
+      # mount read-only during dry runs; use rw only with dry-run disabled after
       # checking hardlink support, path mappings, and filesystem permissions.
       - ${BRIDGE_MEDIA_ROOT:?Set BRIDGE_MEDIA_ROOT to the common media tree}:/media:${BRIDGE_MEDIA_MODE:-ro}
       # Persist SQLite separately from media; this directory must be writable.

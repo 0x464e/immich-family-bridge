@@ -53,9 +53,9 @@ Test the actual deployment mount and UID/GID with a disposable source file befor
 
 ## Configure and run
 
-1. Copy [config.example.yaml](config.example.yaml) to a private YAML file. Leave `dry_run: true` for the first deployment. Set `family_id`, the Immich API URL ending in `/api`, `source_root`, `source_mappings`, `bridge_root`, `immich_bridge_root`, the local SQLite path, and every member's bridge ID, Immich user ID, library ID, and key environment variable. Bridge IDs and the family ID become part of stable paths. The member set cannot be changed after database initialization without an explicit migration.
+1. Copy [config.example.yaml](config.example.yaml) to a private YAML file. Set `family_id`, the Immich API URL ending in `/api`, `source_root`, `source_mappings`, `bridge_root`, `immich_bridge_root`, the local SQLite path, and every member's bridge ID, Immich user ID, library ID, and key environment variable. Bridge IDs and the family ID become part of stable paths. The member set cannot be changed after database initialization without an explicit migration.
 2. Copy [secrets.env.example](secrets.env.example) to a private environment file. Supply the member keys, administrator key, and a random `FAMILYBRIDGE_API_TOKEN`. Keep both private files out of Git. API keys are not logged.
-3. Copy [.env.example](.env.example) to `.env` in your deployment directory. Set absolute host paths, the Immich Docker network name, and `PUID`/`PGID` if the default `1000:1000` cannot read sources and write recipient files and SQLite state. Leave `BRIDGE_MEDIA_MODE=ro` for the dry run. This file supplies Compose paths and options; the API keys belong in the separate file named by `BRIDGE_ENV_FILE`.
+3. Copy [.env.example](.env.example) to `.env` in your deployment directory. Set absolute host paths, the Immich Docker network name, and `PUID`/`PGID` if the default `1000:1000` cannot read sources and write recipient files and SQLite state. Leave `FAMILYBRIDGE_DRY_RUN=true` and `BRIDGE_MEDIA_MODE=ro` for the first deployment. This file supplies Compose paths and options; the API keys belong in the separate file named by `BRIDGE_ENV_FILE`.
 4. Copy [docker-compose.example.yaml](docker-compose.example.yaml) to `compose.yaml` in that directory, review its settings, and start the service:
 
    ~~~sh
@@ -69,9 +69,11 @@ The example uses the published `0x464e/immich-family-bridge:latest` image from D
 
 ### Start with persistent dry-run mode
 
-`dry_run: true` is the default when the setting is omitted. The supplied Compose file also mounts the media tree read-only by default. In this mode, background polling reads Immich and logs a proposed action count. `POST /api/reconcile/dry-run` returns the proposed actions. `POST /api/reconcile` returns HTTP 409, and the bridge does not create albums, add or remove album assets, scan libraries, or create hardlinks. The HTTP adapter and filesystem linker independently reject writes. Registering an album still writes its mapping to the bridge's **local SQLite database** so it can be previewed and used after activation. Updating canonical album metadata through the bridge API also writes only to SQLite until activation.
+`FAMILYBRIDGE_DRY_RUN=true` is the default when the environment variable is omitted. The supplied Compose file also mounts the media tree read-only by default. The service stays running: it previews once at startup and on every `poll_interval` (30 seconds by default), logging each proposed action with the album, member, and asset IDs, followed by an action count. Watch it with `docker compose logs -f familybridge` or the container logs in your deployment UI. For example, a new asset produces a “new source asset found” entry and a “would share asset with member through hardlink and import” entry for each recipient. The same actions can appear on later polls because dry-run deliberately does not complete them. With no registered albums, the cycle reports zero actions.
 
-Confirm the mode with the authenticated `GET /api/status` endpoint before registering an album. Review the dry-run response and the exact source path mappings. A preview cannot prove that hardlink permissions, container mount boundaries, or Immich import timing will work; test those with disposable media. To activate, change the config to `dry_run: false`, change the Compose environment to `BRIDGE_MEDIA_MODE=rw`, and recreate the bridge container. The first scheduled poll will then perform writes, so finish the review and backups **before** restarting. Existing deployments upgrading from v0.1.0 also need these explicit settings to remain active.
+Dry-run does not create albums, add or remove Immich album assets, scan libraries, or create hardlinks. `POST /api/reconcile` returns HTTP 409, and the HTTP adapter and filesystem linker independently reject writes. Registering an album still writes its mapping to the bridge's **local SQLite database** so it can be previewed and used after activation. Updating canonical album metadata through the bridge API also writes only to SQLite until activation. The separate one-shot dry-run HTTP endpoint has been removed; logs are the normal way to inspect the continuous preview.
+
+Confirm the mode with the authenticated `GET /api/status` endpoint before registering an album. Review the logs and exact source path mappings. A preview cannot prove that hardlink permissions, container mount boundaries, or Immich import timing will work; test those with disposable media. To activate, set `FAMILYBRIDGE_DRY_RUN=false` and `BRIDGE_MEDIA_MODE=rw` in the Compose environment, then recreate the bridge container. Its immediate first cycle can then perform writes, so finish the review and backups **before** restarting. Remove any obsolete `dry_run` field from older YAML configurations; mode is controlled only by the environment variable.
 
 ## Register albums and inspect status
 
@@ -89,10 +91,8 @@ curl --fail-with-body -sS \
   -d '{"memberId":"alice","albumId":"<alice-immich-album-id>"}' \
   http://127.0.0.1:8081/api/albums
 
-# Preview. Run the second command only after activating the service.
-curl --fail-with-body -sS -X POST \
-  -H "Authorization: Bearer $BRIDGE_TOKEN" \
-  http://127.0.0.1:8081/api/reconcile/dry-run
+# Dry-run previews appear continuously in the service logs. Run this manual
+# reconciliation command only after activating the service.
 curl --fail-with-body -sS -X POST \
   -H "Authorization: Bearer $BRIDGE_TOKEN" \
   http://127.0.0.1:8081/api/reconcile
@@ -110,7 +110,6 @@ curl --fail-with-body -sS -X POST \
 | `GET /api/filesystem` | Recipient file existence, inode equality, and link details |
 | `POST /api/albums` | Register an Immich album and optional existing replicas |
 | `PATCH /api/albums/{logicalAlbumId}` | Set `name`, `description`, and optional `coverLogicalAssetId` |
-| `POST /api/reconcile/dry-run` | Inspect proposed actions without writes |
 | `POST /api/reconcile` | Run one reconciliation cycle in active mode; HTTP 409 in dry-run mode |
 
 The `PATCH` body should include the complete desired name and description; an omitted description becomes empty. Set a cover only after that logical asset is known and mapped. The bridge leaves the cover unchanged for a member until that member's asset ID is ready.

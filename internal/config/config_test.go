@@ -10,6 +10,17 @@ import (
 )
 
 func TestLoadDefaultsToDryRun(t *testing.T) {
+	previous, wasSet := os.LookupEnv("FAMILYBRIDGE_DRY_RUN")
+	if err := os.Unsetenv("FAMILYBRIDGE_DRY_RUN"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("FAMILYBRIDGE_DRY_RUN", previous)
+		} else {
+			_ = os.Unsetenv("FAMILYBRIDGE_DRY_RUN")
+		}
+	})
 	media := t.TempDir()
 	upload := filepath.Join(media, "upload")
 	if err := os.Mkdir(upload, 0750); err != nil {
@@ -41,18 +52,34 @@ members:
 `, media, upload, filepath.Join(media, "bridge"), filepath.Join(t.TempDir(), "bridge.sqlite"))
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	for _, tc := range []struct {
-		name, text string
-		want       bool
-	}{{"omitted", base, true}, {"explicit false", "dry_run: false\n" + base, false}} {
+		name, env string
+		want      bool
+		wantError bool
+	}{{name: "omitted", want: true}, {name: "explicit true", env: "true", want: true}, {name: "explicit false", env: "false"}, {name: "invalid", env: "maybe", wantError: true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := os.WriteFile(path, []byte(tc.text), 0600); err != nil {
+			if tc.env != "" {
+				t.Setenv("FAMILYBRIDGE_DRY_RUN", tc.env)
+			}
+			if err := os.WriteFile(path, []byte(base), 0600); err != nil {
 				t.Fatal(err)
 			}
 			c, err := Load(path)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("accepted invalid FAMILYBRIDGE_DRY_RUN")
+				}
+				return
+			}
 			if err != nil || c.DryRun != tc.want {
-				t.Fatalf("dry_run=%v, err=%v, want %v", c.DryRun, err, tc.want)
+				t.Fatalf("DryRun=%v, err=%v, want %v", c.DryRun, err, tc.want)
 			}
 		})
+	}
+	if err := os.WriteFile(path, []byte("dry_run: false\n"+base), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("accepted obsolete dry_run YAML field")
 	}
 }
 

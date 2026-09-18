@@ -157,14 +157,6 @@ func (s *Server) Handler() http.Handler {
 		}
 		write(w, 200, map[string]string{"status": "ok"})
 	})
-	api.HandleFunc("POST /api/reconcile/dry-run", func(w http.ResponseWriter, r *http.Request) {
-		v, e := s.R.DryRun(r.Context())
-		if e != nil {
-			write(w, 500, map[string]string{"error": e.Error()})
-			return
-		}
-		write(w, 200, v)
-	})
 	mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if s.C.APIToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.C.APIToken)) != 1 {

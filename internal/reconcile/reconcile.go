@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -26,7 +27,7 @@ type Reconciler struct {
 	mu  sync.Mutex
 }
 
-var ErrDryRunMode = errors.New("dry-run mode enabled; use /api/reconcile/dry-run to preview actions")
+var ErrDryRunMode = errors.New("dry-run mode enabled; proposed actions are reported in the service logs")
 
 func New(c config.Config, db *store.Store, api immich.Client, log *slog.Logger) *Reconciler {
 	return &Reconciler{C: c, DB: db, API: api, FS: filesystem.Linker{SourceRoot: c.SourceRoot, BridgeRoot: c.BridgeRoot, ReadOnly: c.DryRun}, Log: log}
@@ -485,14 +486,50 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 }
 
 type Action struct {
-	Kind           string `json:"kind"`
-	AlbumID        string `json:"albumId"`
-	MemberID       string `json:"memberId,omitempty"`
-	LogicalAssetID string `json:"logicalAssetId,omitempty"`
-	ImmichAssetID  string `json:"immichAssetId,omitempty"`
+	Kind           string
+	AlbumID        string
+	AlbumName      string
+	MemberID       string
+	SourceMemberID string
+	LogicalAssetID string
+	ImmichAssetID  string
+	Error          string
 }
 
-func (r *Reconciler) DryRun(ctx context.Context) (map[string]any, error) {
+func (a Action) Message() string {
+	switch a.Kind {
+	case "create_album_replica":
+		return "dry-run: would create album for member"
+	case "mapping_inconsistency":
+		return "dry-run: unknown bridge or foreign asset needs review"
+	case "unsupported_asset":
+		return "dry-run: source asset cannot be shared"
+	case "source_error":
+		return "dry-run: source asset path needs review"
+	case "source_missing":
+		return "dry-run: previously observed asset is missing from Immich; sharing reference would be kept"
+	case "discover_origin":
+		return "dry-run: new source asset found in album"
+	case "link_and_import":
+		return "dry-run: would share asset with member through hardlink and import"
+	case "add_sharing_reference":
+		return "dry-run: would add asset to shared album membership"
+	case "remove_sharing_reference":
+		return "dry-run: would remove album sharing reference"
+	case "add_album_asset":
+		return "dry-run: would add member asset to album"
+	case "remove_album_asset":
+		return "dry-run: would remove member asset from album"
+	case "update_album_metadata":
+		return "dry-run: would update member album name or description"
+	case "update_album_cover":
+		return "dry-run: would update member album cover"
+	default:
+		return "dry-run: proposed action"
+	}
+}
+
+func (r *Reconciler) DryRun(ctx context.Context) ([]Action, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	albums, err := r.DB.Albums()
@@ -501,6 +538,11 @@ func (r *Reconciler) DryRun(ctx context.Context) (map[string]any, error) {
 	}
 	actions := []Action{}
 	for _, album := range albums {
+		add := func(action Action) {
+			action.AlbumID = album.ID
+			action.AlbumName = album.Name
+			actions = append(actions, action)
+		}
 		reps, err := r.DB.AlbumReplicas(album.ID)
 		if err != nil {
 			return nil, err
@@ -515,8 +557,28 @@ func (r *Reconciler) DryRun(ctx context.Context) (map[string]any, error) {
 		for _, m := range r.C.Members {
 			albumID := reps[m.ID]
 			if albumID == "" {
-				actions = append(actions, Action{Kind: "create_album_replica", AlbumID: album.ID, MemberID: m.ID})
+				add(Action{Kind: "create_album_replica", MemberID: m.ID})
 				continue
+			}
+			remoteAlbum, err := r.API.GetAlbum(ctx, m, albumID)
+			if err != nil {
+				return nil, fmt.Errorf("get album for %s: %w", m.ID, err)
+			}
+			if remoteAlbum.OwnerID != "" && remoteAlbum.OwnerID != m.UserID {
+				add(Action{Kind: "mapping_inconsistency", MemberID: m.ID, Error: "album owner mismatch"})
+				continue
+			}
+			if remoteAlbum.Name != album.Name || remoteAlbum.Description != album.Description {
+				add(Action{Kind: "update_album_metadata", MemberID: m.ID})
+			}
+			if album.CoverID != "" {
+				cover, found, err := r.DB.Replica(album.CoverID, m.ID)
+				if err != nil {
+					return nil, err
+				}
+				if found && cover.AssetID != "" && cover.State == "ready" && remoteAlbum.CoverID != cover.AssetID {
+					add(Action{Kind: "update_album_cover", MemberID: m.ID, LogicalAssetID: album.CoverID, ImmichAssetID: cover.AssetID})
+				}
 			}
 			assets, err := r.API.ListAlbumAssets(ctx, m, albumID)
 			if err != nil {
@@ -535,13 +597,34 @@ func (r *Reconciler) DryRun(ctx context.Context) (map[string]any, error) {
 				}
 				if !known {
 					if asset.OwnerID != m.UserID || asset.LibraryID == m.LibraryID {
-						actions = append(actions, Action{Kind: "mapping_inconsistency", AlbumID: album.ID, MemberID: m.ID, ImmichAssetID: asset.ID})
+						add(Action{Kind: "mapping_inconsistency", MemberID: m.ID, ImmichAssetID: asset.ID})
 						continue
 					}
-					actions = append(actions, Action{Kind: "discover_origin", AlbumID: album.ID, MemberID: m.ID, ImmichAssetID: asset.ID})
+					sourceID := asset.ID
+					asset, e = r.API.GetAsset(ctx, m, sourceID)
+					if e != nil {
+						return nil, fmt.Errorf("inspect source asset %s: %w", sourceID, e)
+					}
+					if asset.OwnerID != m.UserID || asset.LibraryID == m.LibraryID {
+						add(Action{Kind: "mapping_inconsistency", MemberID: m.ID, ImmichAssetID: sourceID})
+						continue
+					}
+					if !asset.Supported() {
+						add(Action{Kind: "unsupported_asset", MemberID: m.ID, ImmichAssetID: asset.ID})
+						continue
+					}
+					mapped, e := r.mappedAsset(asset)
+					if e == nil {
+						_, e = r.FS.SourceInfo(mapped.OriginalPath)
+					}
+					if e != nil {
+						add(Action{Kind: "source_error", MemberID: m.ID, ImmichAssetID: asset.ID, Error: e.Error()})
+						continue
+					}
+					add(Action{Kind: "discover_origin", MemberID: m.ID, ImmichAssetID: asset.ID})
 					for _, other := range r.C.Members {
 						if other.ID != m.ID {
-							actions = append(actions, Action{Kind: "link_and_import", AlbumID: album.ID, MemberID: other.ID, ImmichAssetID: asset.ID})
+							add(Action{Kind: "link_and_import", MemberID: other.ID, SourceMemberID: m.ID, ImmichAssetID: asset.ID})
 						}
 					}
 					continue
@@ -553,6 +636,14 @@ func (r *Reconciler) DryRun(ctx context.Context) (map[string]any, error) {
 			if album.Initialized {
 				for old := range prior {
 					if !actual[m.ID][old] {
+						_, checkErr := r.API.GetAsset(ctx, m, old)
+						if errors.Is(checkErr, immich.ErrNotFound) {
+							add(Action{Kind: "source_missing", MemberID: m.ID, ImmichAssetID: old})
+							continue
+						}
+						if checkErr != nil {
+							return nil, fmt.Errorf("check missing album asset for %s: %w", m.ID, checkErr)
+						}
 						lid, known, e := r.DB.FindReplicaAsset(m.ID, old)
 						if e != nil {
 							return nil, e
@@ -566,14 +657,17 @@ func (r *Reconciler) DryRun(ctx context.Context) (map[string]any, error) {
 		}
 		for id := range adds {
 			if !desired[id] {
-				actions = append(actions, Action{Kind: "add_sharing_reference", AlbumID: album.ID, LogicalAssetID: id})
+				add(Action{Kind: "add_sharing_reference", LogicalAssetID: id})
 			}
 			desired[id] = true
 		}
 		for id := range removes {
 			if !adds[id] {
+				wasDesired := desired[id]
 				delete(desired, id)
-				actions = append(actions, Action{Kind: "remove_sharing_reference", AlbumID: album.ID, LogicalAssetID: id})
+				if wasDesired {
+					add(Action{Kind: "remove_sharing_reference", LogicalAssetID: id})
+				}
 			}
 		}
 		for _, m := range r.C.Members {
@@ -586,9 +680,9 @@ func (r *Reconciler) DryRun(ctx context.Context) (map[string]any, error) {
 					return nil, e
 				}
 				if !found || rep.AssetID == "" {
-					actions = append(actions, Action{Kind: "link_and_import", AlbumID: album.ID, MemberID: m.ID, LogicalAssetID: id})
+					add(Action{Kind: "link_and_import", MemberID: m.ID, LogicalAssetID: id})
 				} else if !actual[m.ID][rep.AssetID] {
-					actions = append(actions, Action{Kind: "add_album_asset", AlbumID: album.ID, MemberID: m.ID, LogicalAssetID: id, ImmichAssetID: rep.AssetID})
+					add(Action{Kind: "add_album_asset", MemberID: m.ID, LogicalAssetID: id, ImmichAssetID: rep.AssetID})
 				}
 			}
 			for assetID := range actual[m.ID] {
@@ -597,12 +691,23 @@ func (r *Reconciler) DryRun(ctx context.Context) (map[string]any, error) {
 					return nil, e
 				}
 				if known && !desired[lid] {
-					actions = append(actions, Action{Kind: "remove_album_asset", AlbumID: album.ID, MemberID: m.ID, LogicalAssetID: lid, ImmichAssetID: assetID})
+					add(Action{Kind: "remove_album_asset", MemberID: m.ID, LogicalAssetID: lid, ImmichAssetID: assetID})
 				}
 			}
 		}
 	}
-	return map[string]any{"actions": actions, "count": len(actions)}, nil
+	sort.Slice(actions, func(i, j int) bool {
+		a, b := actions[i], actions[j]
+		left := [...]string{a.AlbumID, a.Kind, a.MemberID, a.SourceMemberID, a.LogicalAssetID, a.ImmichAssetID}
+		right := [...]string{b.AlbumID, b.Kind, b.MemberID, b.SourceMemberID, b.LogicalAssetID, b.ImmichAssetID}
+		for k := range left {
+			if left[k] != right[k] {
+				return left[k] < right[k]
+			}
+		}
+		return false
+	})
+	return actions, nil
 }
 
 func (r *Reconciler) Check(ctx context.Context) error {

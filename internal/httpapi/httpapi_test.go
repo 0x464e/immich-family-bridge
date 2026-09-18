@@ -70,7 +70,7 @@ func TestDryRunModeReportsAndBlocksActiveEndpoint(t *testing.T) {
 		method, path string
 		want         int
 		body         string
-	}{{"GET", "/api/status", 200, "dry_run"}, {"POST", "/api/reconcile", 409, "dry-run mode enabled"}} {
+	}{{"GET", "/api/status", 200, "dry_run"}, {"POST", "/api/reconcile", 409, "dry-run mode enabled"}, {"POST", "/api/reconcile/dry-run", 404, "404 page not found"}} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
 		req.Header.Set("Authorization", "Bearer secret")
 		rec := httptest.NewRecorder()

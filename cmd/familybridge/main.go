@@ -53,30 +53,27 @@ func main() {
 		log.Error("database initialization failed", "error", err)
 		os.Exit(1)
 	}
-	interval, _ := c.Interval()
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if c.DryRun {
-					preview, e := r.DryRun(ctx)
-					if e != nil {
-						log.Error("dry-run preview incomplete", "error", e)
-					} else {
-						log.Info("dry-run preview", "action_count", preview["count"])
-					}
-					continue
-				}
-				if e := r.Run(ctx); e != nil {
-					log.Error("reconciliation cycle incomplete", "error", e)
-				}
-			}
+	if c.DryRun {
+		if albums, err := db.Albums(); err == nil && len(albums) == 0 {
+			log.Info("dry-run has no registered albums; register one through the internal API to preview sharing")
 		}
-	}()
+	}
+	interval, _ := c.Interval()
+	runCycle := func() {
+		if c.DryRun {
+			actions, err := r.DryRun(ctx)
+			if err != nil {
+				log.Error("dry-run cycle incomplete; will retry", "error", err)
+				return
+			}
+			logDryRunActions(log, actions)
+			return
+		}
+		if err := r.Run(ctx); err != nil {
+			log.Error("reconciliation cycle incomplete", "error", err)
+		}
+	}
+	go runPolling(ctx, interval, runCycle)
 	srv := &http.Server{Addr: c.Listen, Handler: (&httpapi.Server{C: c, DB: db, R: r}).Handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -93,4 +90,46 @@ func main() {
 		log.Error("HTTP server failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func runPolling(ctx context.Context, interval time.Duration, cycle func()) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	cycle()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cycle()
+		}
+	}
+}
+
+func logDryRunActions(log *slog.Logger, actions []reconcile.Action) {
+	for _, action := range actions {
+		attrs := []any{"kind", action.Kind, "album_id", action.AlbumID, "album_name", action.AlbumName}
+		if action.MemberID != "" {
+			attrs = append(attrs, "member_id", action.MemberID)
+		}
+		if action.SourceMemberID != "" {
+			attrs = append(attrs, "source_member_id", action.SourceMemberID)
+		}
+		if action.LogicalAssetID != "" {
+			attrs = append(attrs, "logical_asset_id", action.LogicalAssetID)
+		}
+		if action.ImmichAssetID != "" {
+			attrs = append(attrs, "immich_asset_id", action.ImmichAssetID)
+		}
+		if action.Error != "" {
+			attrs = append(attrs, "error", action.Error)
+		}
+		switch action.Kind {
+		case "mapping_inconsistency", "unsupported_asset", "source_error", "source_missing":
+			log.Warn(action.Message(), attrs...)
+		default:
+			log.Info(action.Message(), attrs...)
+		}
+	}
+	log.Info("dry-run cycle complete", "action_count", len(actions))
 }
