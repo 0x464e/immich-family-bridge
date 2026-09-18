@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/0x464e/immich-family-bridge/compare/v0.4.2...v0.4.3) (2026-09-18)
+
+
+### Bug Fixes
+
+* reconcile large delayed imports safely ([6b56569](https://github.com/0x464e/immich-family-bridge/commit/6b5656976c8194a7df1b8c0115970193620b4ea4))
+
 ## [0.4.2](https://github.com/0x464e/immich-family-bridge/compare/v0.4.1...v0.4.2) (2026-09-18)
 
 
