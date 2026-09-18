@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/0x464e/immich-family-bridge/compare/v0.1.0...v0.2.0) (2026-09-18)
+
+
+### Features
+
+* add persistent read-only dry-run mode ([f2f2be7](https://github.com/0x464e/immich-family-bridge/commit/f2f2be727fbfc3b0e7f2c39ec6cedeaa606ce6e4))
+
 ## 0.1.0 (2026-09-17)
 
 
