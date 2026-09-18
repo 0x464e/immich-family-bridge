@@ -36,6 +36,7 @@ func main() {
 	defer db.Close()
 	api := httpclient.New(c.ImmichURL)
 	api.AdminKey = c.AdminKey
+	api.ReadOnly = c.DryRun
 	version, err := api.Version(context.Background())
 	if err != nil || !strings.HasPrefix(version, "3.") {
 		log.Error("unsupported Immich API version", "version", version, "error", err)
@@ -61,6 +62,15 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if c.DryRun {
+					preview, e := r.DryRun(ctx)
+					if e != nil {
+						log.Error("dry-run preview incomplete", "error", e)
+					} else {
+						log.Info("dry-run preview", "action_count", preview["count"])
+					}
+					continue
+				}
 				if e := r.Run(ctx); e != nil {
 					log.Error("reconciliation cycle incomplete", "error", e)
 				}
@@ -74,7 +84,11 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()
-	log.Info("Immich Family Bridge started", "listen", c.Listen, "immich_version", version)
+	mode := "active"
+	if c.DryRun {
+		mode = "dry_run"
+	}
+	log.Info("Immich Family Bridge started", "listen", c.Listen, "immich_version", version, "mode", mode)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("HTTP server failed", "error", err)
 		os.Exit(1)

@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -13,6 +14,46 @@ import (
 	fake "github.com/0x464e/immich-family-bridge/internal/immich/testfake"
 	"github.com/0x464e/immich-family-bridge/internal/store"
 )
+
+func TestPersistentDryRunDoesNotWriteImmichOrMedia(t *testing.T) {
+	c, db, api, _ := setup(t)
+	c.DryRun = true
+	r := New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	id, err := r.Register(ctx, "alice", "trip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Register(ctx, "alice", "trip"); err != nil {
+		t.Fatal("repeat registration:", err)
+	}
+	reps, err := db.AlbumReplicas(id)
+	if err != nil || len(reps) != 1 || reps["alice"] != "trip" {
+		t.Fatalf("dry-run registration created remote albums: %+v, %v", reps, err)
+	}
+	preview, err := r.DryRun(ctx)
+	if err != nil || preview["count"].(int) == 0 {
+		t.Fatalf("missing dry-run actions: %+v, %v", preview, err)
+	}
+	if err := r.Run(ctx); !errors.Is(err, ErrDryRunMode) {
+		t.Fatalf("active reconciliation in dry-run mode: %v", err)
+	}
+	assets, err := db.Replicas()
+	if err != nil || len(assets) != 0 {
+		t.Fatalf("dry run wrote asset replicas: %+v, %v", assets, err)
+	}
+	if _, err := os.Stat(c.BridgeRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry run created recipient tree: %v", err)
+	}
+	c.DryRun = false
+	if err := New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx); err != nil {
+		t.Fatal("active reconciliation after dry run:", err)
+	}
+	reps, err = db.AlbumReplicas(id)
+	if err != nil || len(reps) != len(c.Members) {
+		t.Fatalf("active reconciliation did not create albums: %+v, %v", reps, err)
+	}
+}
 
 func setup(t *testing.T) (config.Config, *store.Store, *fake.Client, *Reconciler) {
 	t.Helper()

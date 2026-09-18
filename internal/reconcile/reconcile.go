@@ -26,8 +26,10 @@ type Reconciler struct {
 	mu  sync.Mutex
 }
 
+var ErrDryRunMode = errors.New("dry-run mode enabled; use /api/reconcile/dry-run to preview actions")
+
 func New(c config.Config, db *store.Store, api immich.Client, log *slog.Logger) *Reconciler {
-	return &Reconciler{C: c, DB: db, API: api, FS: filesystem.Linker{SourceRoot: c.SourceRoot, BridgeRoot: c.BridgeRoot}, Log: log}
+	return &Reconciler{C: c, DB: db, API: api, FS: filesystem.Linker{SourceRoot: c.SourceRoot, BridgeRoot: c.BridgeRoot, ReadOnly: c.DryRun}, Log: log}
 }
 func (r *Reconciler) member(id string) (domain.Member, bool) {
 	for _, m := range r.C.Members {
@@ -59,6 +61,9 @@ func (r *Reconciler) RegisterWithReplicas(ctx context.Context, memberID, albumID
 		}
 		for _, a := range albums {
 			if a.ID == id {
+				if r.C.DryRun {
+					return id, nil
+				}
 				return id, r.ensureAlbumReplicas(ctx, a)
 			}
 		}
@@ -112,8 +117,10 @@ func (r *Reconciler) RegisterWithReplicas(ctx context.Context, memberID, albumID
 			}
 		}
 	}
-	if err := r.ensureAlbumReplicas(ctx, logical); err != nil {
-		return id, err
+	if !r.C.DryRun {
+		if err := r.ensureAlbumReplicas(ctx, logical); err != nil {
+			return id, err
+		}
 	}
 	return id, nil
 }
@@ -162,6 +169,9 @@ type observed struct {
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
+	if r.C.DryRun {
+		return ErrDryRunMode
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	albums, err := r.DB.Albums()

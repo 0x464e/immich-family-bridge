@@ -100,3 +100,39 @@ func TestGetAssetRejectsEditedComponent(t *testing.T) {
 		t.Fatalf("edited asset should be unsupported: %+v %v", a, err)
 	}
 }
+
+func TestReadOnlyClientAllowsSearchButBlocksWrites(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/api/search/metadata" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"assets":{"items":[],"nextCursor":null}}`))
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	c.ReadOnly = true
+	c.AdminKey = "admin-key"
+	m := domain.Member{ID: "alice", LibraryID: "library", Key: "member-key"}
+	if _, err := c.FindByPath(context.Background(), m, "/bridge/photo.jpg"); err != nil {
+		t.Fatal("read-only search:", err)
+	}
+	for _, call := range []func() error{
+		func() error {
+			_, err := c.CreateAlbum(context.Background(), m, "id", "name", "description")
+			return err
+		},
+		func() error { return c.UpdateAlbum(context.Background(), m, "album", "name", "description", "") },
+		func() error { return c.AddAssets(context.Background(), m, "album", []string{"asset"}) },
+		func() error { return c.RemoveAssets(context.Background(), m, "album", []string{"asset"}) },
+		func() error { return c.ScanLibrary(context.Background(), m) },
+	} {
+		if err := call(); err == nil {
+			t.Fatal("read-only client accepted a write")
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("write reached Immich HTTP server: %d requests", requests)
+	}
+}

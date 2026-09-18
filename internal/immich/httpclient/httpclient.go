@@ -21,6 +21,7 @@ type Client struct {
 	BaseURL  string
 	HTTP     *http.Client
 	AdminKey string
+	ReadOnly bool
 }
 
 func New(base string) *Client {
@@ -28,6 +29,9 @@ func New(base string) *Client {
 }
 
 func (c *Client) request(ctx context.Context, key, method, path string, body any, out any) error {
+	if c.ReadOnly && method != http.MethodGet && !(method == http.MethodPost && path == "/search/metadata") {
+		return errors.New("dry-run mode blocks Immich API write")
+	}
 	var r io.Reader
 	if body != nil {
 		b, e := json.Marshal(body)

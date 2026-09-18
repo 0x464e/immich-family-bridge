@@ -42,6 +42,13 @@ func (s *Server) Handler() http.Handler {
 		write(w, 200, map[string]string{"status": "ready"})
 	})
 	api := http.NewServeMux()
+	api.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
+		mode := "active"
+		if s.C.DryRun {
+			mode = "dry_run"
+		}
+		write(w, 200, map[string]string{"mode": mode})
+	})
 	api.HandleFunc("GET /api/members", func(w http.ResponseWriter, r *http.Request) {
 		out := make([]map[string]string, 0, len(s.C.Members))
 		for _, m := range s.C.Members {
@@ -140,6 +147,10 @@ func (s *Server) Handler() http.Handler {
 		write(w, 200, map[string]string{"status": "ok"})
 	})
 	api.HandleFunc("POST /api/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		if s.C.DryRun {
+			write(w, 409, map[string]string{"error": reconcile.ErrDryRunMode.Error()})
+			return
+		}
 		if e := s.R.Run(r.Context()); e != nil {
 			write(w, 503, map[string]string{"error": e.Error()})
 			return
