@@ -3,6 +3,12 @@
 # mappings, so keep it unchanged after the bridge has created replicas.
 family_id: my-family
 
+# Canonical name of the automatically managed catch-all album. On the first
+# active startup, the bridge creates it for members without a matching album.
+# In dry-run mode it previews those creations without writing to Immich.
+# Change this value to rename the managed albums on later active polls.
+together_album_name: Together
+
 # Immich API base URL as reached from the bridge container. Include the /api
 # suffix. A Compose service name works when both containers share a network.
 immich_url: http://immich-server:2283/api

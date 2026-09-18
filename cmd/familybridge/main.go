@@ -53,11 +53,12 @@ func main() {
 		log.Error("database initialization failed", "error", err)
 		os.Exit(1)
 	}
-	if c.DryRun {
-		if albums, err := db.Albums(); err == nil && len(albums) == 0 {
-			log.Info("dry-run has no registered albums; register one through the internal API to preview sharing")
-		}
+	togetherID, err := r.EnsureTogether(ctx)
+	if err != nil {
+		log.Error("Together album initialization failed", "error", err)
+		os.Exit(1)
 	}
+	log.Info("Together album ready for reconciliation", "logical_album_id", togetherID, "album_name", c.TogetherAlbumName)
 	interval, _ := c.Interval()
 	runCycle := func() {
 		if c.DryRun {

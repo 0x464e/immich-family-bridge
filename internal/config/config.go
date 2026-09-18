@@ -21,21 +21,22 @@ type SourceMapping struct {
 }
 
 type Config struct {
-	FamilyID         string          `yaml:"family_id"`
-	DryRun           bool            `yaml:"-"`
-	ImmichURL        string          `yaml:"immich_url"`
-	AdminKeyEnv      string          `yaml:"admin_key_env"`
-	AdminKey         string          `yaml:"-"`
-	SourceRoot       string          `yaml:"source_root"`
-	SourceMappings   []SourceMapping `yaml:"source_mappings"`
-	BridgeRoot       string          `yaml:"bridge_root"`
-	ImmichBridgeRoot string          `yaml:"immich_bridge_root"`
-	Database         string          `yaml:"database"`
-	Listen           string          `yaml:"listen"`
-	APITokenEnv      string          `yaml:"api_token_env"`
-	APIToken         string          `yaml:"-"`
-	PollInterval     string          `yaml:"poll_interval"`
-	Members          []domain.Member `yaml:"members"`
+	FamilyID          string          `yaml:"family_id"`
+	DryRun            bool            `yaml:"-"`
+	ImmichURL         string          `yaml:"immich_url"`
+	AdminKeyEnv       string          `yaml:"admin_key_env"`
+	AdminKey          string          `yaml:"-"`
+	SourceRoot        string          `yaml:"source_root"`
+	SourceMappings    []SourceMapping `yaml:"source_mappings"`
+	BridgeRoot        string          `yaml:"bridge_root"`
+	ImmichBridgeRoot  string          `yaml:"immich_bridge_root"`
+	Database          string          `yaml:"database"`
+	Listen            string          `yaml:"listen"`
+	APITokenEnv       string          `yaml:"api_token_env"`
+	APIToken          string          `yaml:"-"`
+	PollInterval      string          `yaml:"poll_interval"`
+	TogetherAlbumName string          `yaml:"together_album_name"`
+	Members           []domain.Member `yaml:"members"`
 }
 
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
@@ -63,6 +64,9 @@ func Load(path string) (Config, error) {
 	if c.PollInterval == "" {
 		c.PollInterval = "30s"
 	}
+	if c.TogetherAlbumName == "" {
+		c.TogetherAlbumName = "Together"
+	}
 	if c.APITokenEnv != "" {
 		c.APIToken = os.Getenv(c.APITokenEnv)
 	}
@@ -82,6 +86,9 @@ func (c Config) Interval() (time.Duration, error) { return time.ParseDuration(c.
 func (c Config) Validate() error {
 	if !safeID.MatchString(c.FamilyID) {
 		return errors.New("invalid family_id")
+	}
+	if strings.TrimSpace(c.TogetherAlbumName) == "" || c.TogetherAlbumName != strings.TrimSpace(c.TogetherAlbumName) {
+		return errors.New("together_album_name must be a nonempty name without surrounding whitespace")
 	}
 	u, err := url.Parse(c.ImmichURL)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.TrimRight(u.Path, "/") != "/api" {

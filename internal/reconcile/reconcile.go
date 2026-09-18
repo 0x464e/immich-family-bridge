@@ -41,6 +41,122 @@ func (r *Reconciler) member(id string) (domain.Member, bool) {
 	return domain.Member{}, false
 }
 
+// EnsureTogether keeps one logical catch-all album and adopts uniquely named
+// member albums when they already exist. Immich writes remain in Run.
+func (r *Reconciler) EnsureTogether(ctx context.Context) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	name := r.C.TogetherAlbumName
+	if name == "" {
+		name = "Together"
+	}
+	albums, err := r.DB.Albums()
+	if err != nil {
+		return "", err
+	}
+	var selected *domain.LogicalAlbum
+	for i := range albums {
+		if albums[i].SystemKey == "together" {
+			selected = &albums[i]
+			break
+		}
+	}
+	if selected == nil {
+		for i := range albums {
+			if albums[i].Name != name {
+				continue
+			}
+			if selected != nil {
+				return "", fmt.Errorf("multiple registered albums named %q; cannot choose a Together album", name)
+			}
+			selected = &albums[i]
+		}
+	}
+	replicas := map[string]string{}
+	if selected != nil {
+		replicas, err = r.DB.AlbumReplicas(selected.ID)
+		if err != nil {
+			return "", err
+		}
+	}
+	found := map[string]string{}
+	description := ""
+	for _, m := range r.C.Members {
+		if replicas[m.ID] != "" {
+			continue
+		}
+		album, exists, err := r.findOwnedAlbumByName(ctx, m, name)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			continue
+		}
+		mapped, known, err := r.DB.AlbumByReplica(m.ID, album.ID)
+		if err != nil {
+			return "", err
+		}
+		if known && (selected == nil || mapped != selected.ID) {
+			return "", fmt.Errorf("%s album %s is already registered to another logical album", m.ID, album.ID)
+		}
+		found[m.ID] = album.ID
+		if description == "" {
+			description = album.Description
+		}
+	}
+	if selected == nil {
+		album := domain.LogicalAlbum{ID: store.ID(), Name: name, Description: description, SystemKey: "together"}
+		if err := r.DB.AddAlbum(r.C.FamilyID, album, found); err != nil {
+			return "", err
+		}
+		return album.ID, nil
+	}
+	if selected.SystemKey == "" {
+		if err := r.DB.SetAlbumSystemKey(selected.ID, "together"); err != nil {
+			return "", err
+		}
+	}
+	if selected.Name != name {
+		if err := r.DB.UpdateAlbum(selected.ID, name, selected.Description, selected.CoverID); err != nil {
+			return "", err
+		}
+	}
+	for memberID, albumID := range found {
+		if err := r.DB.SetAlbumReplica(selected.ID, memberID, albumID); err != nil {
+			return "", err
+		}
+	}
+	return selected.ID, nil
+}
+
+func (r *Reconciler) findOwnedAlbumByName(ctx context.Context, m domain.Member, name string) (domain.Album, bool, error) {
+	albums, err := r.API.ListAlbums(ctx, m)
+	if err != nil {
+		return domain.Album{}, false, fmt.Errorf("list albums for %s: %w", m.ID, err)
+	}
+	var match domain.Album
+	for _, album := range albums {
+		if album.Name != name {
+			continue
+		}
+		if match.ID != "" {
+			return domain.Album{}, false, fmt.Errorf("member %s has multiple albums named %q", m.ID, name)
+		}
+		match = album
+	}
+	if match.ID == "" {
+		return domain.Album{}, false, nil
+	}
+	match, err = r.API.GetAlbum(ctx, m, match.ID)
+	if err != nil {
+		return domain.Album{}, false, err
+	}
+	if match.OwnerID != m.UserID || match.Name != name {
+		return domain.Album{}, false, fmt.Errorf("member %s album ownership or name changed during lookup", m.ID)
+	}
+	return match, true, nil
+}
+
 func (r *Reconciler) Register(ctx context.Context, memberID, albumID string) (string, error) {
 	return r.RegisterWithReplicas(ctx, memberID, albumID, nil)
 }
@@ -148,6 +264,18 @@ func (r *Reconciler) ensureAlbumReplicas(ctx context.Context, a domain.LogicalAl
 	for _, m := range r.C.Members {
 		if reps[m.ID] != "" {
 			continue
+		}
+		if a.SystemKey == "together" {
+			existing, found, err := r.findOwnedAlbumByName(ctx, m, a.Name)
+			if err != nil {
+				return err
+			}
+			if found {
+				if err := r.DB.SetAlbumReplica(a.ID, m.ID, existing.ID); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		made, err := r.API.CreateAlbum(ctx, m, a.ID, a.Name, a.Description)
 		if err != nil {

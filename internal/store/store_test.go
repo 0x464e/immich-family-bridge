@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -40,10 +41,55 @@ func TestPersistenceAndMigrations(t *testing.T) {
 		t.Fatalf("mapping lost on restart: %+v %v", rep, e)
 	}
 	var version int
-	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 2 {
+	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 3 {
 		t.Fatalf("migration version %d %v", version, e)
 	}
 	if _, e := s.DB.Exec(`INSERT INTO asset_replica_files(logical_asset_id,member_id,component_kind,source_path,recipient_path,state) VALUES(?,?,?,?,?,?)`, id, "b", "original", "/fixture/a.jpg", "/fixture/bridge/b.jpg", "ready"); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestUpgradeExistingDatabasePreservesAlbums(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	for i, file := range []string{"migrations/001_init.sql", "migrations/002_components.sql"} {
+		content, err := migrations.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(content)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO schema_migrations(version) VALUES(?)`, i+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO families(id) VALUES('family'); INSERT INTO logical_albums(id,family_id,name,description) VALUES('old-together','family','Together','existing album')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	albums, err := store.Albums()
+	if err != nil || len(albums) != 1 || albums[0].ID != "old-together" || albums[0].SystemKey != "" {
+		t.Fatalf("existing album changed during migration: %+v, %v", albums, err)
+	}
+	if err := store.SetAlbumSystemKey("old-together", "together"); err != nil {
+		t.Fatal(err)
+	}
+	albums, err = store.Albums()
+	if err != nil || albums[0].SystemKey != "together" {
+		t.Fatalf("system key not persisted: %+v, %v", albums, err)
 	}
 }

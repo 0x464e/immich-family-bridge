@@ -78,4 +78,5 @@ type LogicalAlbum struct {
 	Description string `json:"description"`
 	CoverID     string `json:"coverLogicalAssetId,omitempty"`
 	Initialized bool   `json:"initialized"`
+	SystemKey   string `json:"systemKey,omitempty"`
 }
