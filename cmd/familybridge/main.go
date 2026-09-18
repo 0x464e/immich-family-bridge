@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -33,7 +34,6 @@ func main() {
 		log.Error("database unavailable", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
 	api := httpclient.New(c.ImmichURL)
 	api.AdminKey = c.AdminKey
 	api.ReadOnly = c.DryRun
@@ -64,23 +64,34 @@ func main() {
 		if c.DryRun {
 			actions, err := r.DryRun(ctx)
 			if err != nil {
-				log.Error("dry-run cycle incomplete; will retry", "error", err)
+				if ctx.Err() == nil {
+					log.Error("dry-run cycle incomplete; will retry", "error", err)
+				}
 				return
 			}
 			logDryRunActions(log, actions)
 			return
 		}
-		if err := r.Run(ctx); err != nil {
+		if err := r.Run(ctx); err != nil && ctx.Err() == nil {
 			log.Error("reconciliation cycle incomplete", "error", err)
 		}
 	}
-	go runPolling(ctx, interval, runCycle)
-	srv := &http.Server{Addr: c.Listen, Handler: (&httpapi.Server{C: c, DB: db, R: r}).Handler(), ReadHeaderTimeout: 5 * time.Second}
+	pollingDone := make(chan struct{})
 	go func() {
+		defer close(pollingDone)
+		runPolling(ctx, interval, runCycle)
+	}()
+	srv := &http.Server{Addr: c.Listen, Handler: (&httpapi.Server{C: c, DB: db, R: r}).Handler(), ReadHeaderTimeout: 5 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdown)
+		if err := srv.Shutdown(shutdown); err != nil {
+			log.Warn("HTTP server shutdown incomplete", "error", err)
+		}
 	}()
 	mode := "active"
 	if c.DryRun {
@@ -89,19 +100,30 @@ func main() {
 	log.Info("Immich Family Bridge started", "listen", c.Listen, "immich_version", version, "mode", mode)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("HTTP server failed", "error", err)
-		os.Exit(1)
+	}
+	stop()
+	<-pollingDone
+	<-shutdownDone
+	if err := db.Close(); err != nil {
+		log.Warn("database close failed", "error", err)
 	}
 }
 
 func runPolling(ctx context.Context, interval time.Duration, cycle func()) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	if ctx.Err() != nil {
+		return
+	}
 	cycle()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
 			cycle()
 		}
 	}

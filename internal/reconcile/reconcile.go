@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/0x464e/immich-family-bridge/internal/config"
 	"github.com/0x464e/immich-family-bridge/internal/domain"
@@ -19,19 +20,35 @@ import (
 )
 
 type Reconciler struct {
-	C   config.Config
-	DB  *store.Store
-	API immich.Client
-	FS  filesystem.Linker
-	Log *slog.Logger
-	mu  sync.Mutex
+	C            config.Config
+	DB           *store.Store
+	API          immich.Client
+	FS           filesystem.Linker
+	Log          *slog.Logger
+	mu           sync.Mutex
+	batchCursor  map[string]string
+	lastScanAt   map[string]time.Time
+	scanInterval time.Duration
+	now          func() time.Time
 }
 
 var ErrDryRunMode = errors.New("dry-run mode enabled; proposed actions are reported in the service logs")
 var errPendingImport = errors.New("waiting for Immich library import")
 
+const (
+	prepareBatchSize = 500
+	lookupBatchSize  = 500
+	auditBatchSize   = 200
+	albumBatchSize   = 100
+)
+
 func New(c config.Config, db *store.Store, api immich.Client, log *slog.Logger) *Reconciler {
-	return &Reconciler{C: c, DB: db, API: api, FS: filesystem.Linker{SourceRoot: c.SourceRoot, BridgeRoot: c.BridgeRoot, ReadOnly: c.DryRun}, Log: log}
+	return &Reconciler{
+		C: c, DB: db, API: api,
+		FS:  filesystem.Linker{SourceRoot: c.SourceRoot, BridgeRoot: c.BridgeRoot, ReadOnly: c.DryRun},
+		Log: log, batchCursor: map[string]string{}, lastScanAt: map[string]time.Time{},
+		scanInterval: 90 * time.Second, now: time.Now,
+	}
 }
 func (r *Reconciler) member(id string) (domain.Member, bool) {
 	for _, m := range r.C.Members {
@@ -310,10 +327,19 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	}
 	var errs []error
 	for _, a := range albums {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if e := r.runAlbum(ctx, a); e != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			r.Log.Error("reconciliation failed", "logical_album_id", a.ID, "error", e)
 			errs = append(errs, fmt.Errorf("album %s: %w", a.ID, e))
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if e := r.DB.MarkUnused(); e != nil {
 		errs = append(errs, e)
@@ -354,6 +380,9 @@ func (r *Reconciler) runAlbum(ctx context.Context, a domain.LogicalAlbum) error 
 		}
 		current := map[string]bool{}
 		for _, asset := range assets {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			current[asset.ID] = true
 			lid, known, e := r.DB.FindReplicaAsset(m.ID, asset.ID)
 			if e != nil {
@@ -432,22 +461,8 @@ func (r *Reconciler) runAlbum(ctx context.Context, a domain.LogicalAlbum) error 
 		a.CoverID = ""
 	}
 	for _, o := range obs {
-		for logicalID := range desired {
-			rep, err := r.ensureReplica(ctx, logicalID, o.member)
-			if err != nil {
-				if errors.Is(err, errPendingImport) {
-					r.Log.Info("asset waiting for Immich library import", "logical_asset_id", logicalID, "member_id", o.member.ID, "state", "pending_import")
-					continue
-				}
-				r.Log.Warn("asset replica pending", "logical_asset_id", logicalID, "member_id", o.member.ID, "error", err)
-				continue
-			}
-			if rep.AssetID != "" && !o.assets[rep.AssetID] {
-				if err := r.API.AddAssets(ctx, o.member, o.albumID, []string{rep.AssetID}); err != nil {
-					return err
-				}
-				o.assets[rep.AssetID] = true
-			}
+		if err := r.reconcileMemberAssets(ctx, a.ID, o, desired); err != nil {
+			return err
 		}
 		coverID := ""
 		if a.CoverID != "" {
@@ -481,6 +496,198 @@ func (r *Reconciler) runAlbum(ctx context.Context, a domain.LogicalAlbum) error 
 	return nil
 }
 
+// batchAfter rotates through a sorted worklist so that pending imports and
+// ready audits keep making progress even when there are more than one cycle's
+// worth of assets. The cursor only affects scheduling; replica state is in SQLite.
+func (r *Reconciler) batchAfter(key string, ids []string, limit int) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	start := sort.Search(len(ids), func(i int) bool { return ids[i] > r.batchCursor[key] })
+	if start == len(ids) {
+		start = 0
+	}
+	count := min(len(ids), limit)
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		out = append(out, ids[(start+i)%len(ids)])
+	}
+	r.batchCursor[key] = out[len(out)-1]
+	return out
+}
+
+func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, o observed, desired map[string]bool) error {
+	ids := make([]string, 0, len(desired))
+	for id := range desired {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	ready := make(map[string]domain.Replica, len(ids))
+	readyIDs := []string{}
+	needsPrepare := []string{}
+	pending := map[string]bool{}
+	unsupported := 0
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rep, found, err := r.DB.Replica(id, o.member.ID)
+		if err != nil {
+			return err
+		}
+		switch {
+		case found && rep.State == "ready" && rep.AssetID != "":
+			ready[id] = rep
+			readyIDs = append(readyIDs, id)
+		case found && rep.State == "pending_import" && rep.Path != "":
+			pending[id] = true
+		case found && rep.State == "unsupported":
+			unsupported++
+		default:
+			needsPrepare = append(needsPrepare, id)
+		}
+	}
+	key := albumID + ":" + o.member.ID
+	toPrepare := r.batchAfter("prepare:"+key, needsPrepare, prepareBatchSize)
+	for _, id := range toPrepare {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rep, err := r.ensureReplica(ctx, id, o.member)
+		if errors.Is(err, errPendingImport) {
+			pending[id] = true
+			continue
+		}
+		if err != nil {
+			if canceled := ctx.Err(); canceled != nil {
+				return canceled
+			}
+			r.Log.Warn("asset replica pending", "logical_asset_id", id, "member_id", o.member.ID, "error", err)
+			continue
+		}
+		if rep.State == "ready" && rep.AssetID != "" {
+			ready[id] = rep
+		}
+	}
+	for _, id := range r.batchAfter("audit:"+key, readyIDs, auditBatchSize) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rep, err := r.ensureReplica(ctx, id, o.member)
+		if errors.Is(err, errPendingImport) {
+			delete(ready, id)
+			pending[id] = true
+			continue
+		}
+		if err != nil {
+			if canceled := ctx.Err(); canceled != nil {
+				return canceled
+			}
+			delete(ready, id)
+			r.Log.Warn("asset replica audit failed", "logical_asset_id", id, "member_id", o.member.ID, "error", err)
+			continue
+		}
+		ready[id] = rep
+	}
+	scanned := false
+	if len(pending) > 0 {
+		now := r.now()
+		if last := r.lastScanAt[o.member.ID]; last.IsZero() || now.Sub(last) >= r.scanInterval {
+			r.lastScanAt[o.member.ID] = now
+			if err := r.API.ScanLibrary(ctx, o.member); err != nil {
+				if canceled := ctx.Err(); canceled != nil {
+					return canceled
+				}
+				r.Log.Warn("recipient library scan request failed", "member_id", o.member.ID, "error", err)
+			} else {
+				scanned = true
+			}
+		}
+	}
+	pendingIDs := make([]string, 0, len(pending))
+	for id := range pending {
+		pendingIDs = append(pendingIDs, id)
+	}
+	sort.Strings(pendingIDs)
+	imported := 0
+	for _, id := range r.batchAfter("lookup:"+key, pendingIDs, lookupBatchSize) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rep, found, err := r.DB.Replica(id, o.member.ID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("pending replica mapping disappeared for %s", id)
+		}
+		rep, err = r.resolvePendingImport(ctx, rep, o.member)
+		if errors.Is(err, errPendingImport) {
+			continue
+		}
+		if err != nil {
+			if canceled := ctx.Err(); canceled != nil {
+				return canceled
+			}
+			r.Log.Warn("asset import lookup failed", "logical_asset_id", id, "member_id", o.member.ID, "error", err)
+			continue
+		}
+		ready[id] = rep
+		imported++
+	}
+	toAdd := []string{}
+	for _, id := range ids {
+		if rep, ok := ready[id]; ok && rep.AssetID != "" && !o.assets[rep.AssetID] {
+			toAdd = append(toAdd, rep.AssetID)
+		}
+	}
+	for start := 0; start < len(toAdd); start += albumBatchSize {
+		end := min(start+albumBatchSize, len(toAdd))
+		if err := r.API.AddAssets(ctx, o.member, o.albumID, toAdd[start:end]); err != nil {
+			return fmt.Errorf("add assets to album for %s: %w", o.member.ID, err)
+		}
+		for _, assetID := range toAdd[start:end] {
+			o.assets[assetID] = true
+		}
+	}
+	if len(pending) > 0 || len(needsPrepare) > 0 || len(toAdd) > 0 {
+		r.Log.Info("member reconciliation progress", "member_id", o.member.ID,
+			"album_id", albumID, "desired", len(ids), "ready", len(ready),
+			"pending_import", len(pending)-imported, "waiting_to_prepare", len(needsPrepare)-len(toPrepare),
+			"unsupported", unsupported, "imported", imported, "album_added", len(toAdd), "scan_requested", scanned)
+	}
+	return nil
+}
+
+func (r *Reconciler) resolvePendingImport(ctx context.Context, rep domain.Replica, m domain.Member) (domain.Replica, error) {
+	rel, err := filepath.Rel(r.C.BridgeRoot, rep.Path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return rep, errors.New("pending recipient path outside bridge root")
+	}
+	remotePath := filepath.Join(r.C.ImmichBridgeRoot, rel)
+	found, err := r.API.FindByPath(ctx, m, remotePath)
+	if err != nil {
+		return rep, err
+	}
+	if len(found) == 0 {
+		return rep, errPendingImport
+	}
+	if len(found) != 1 {
+		return rep, fmt.Errorf("expected one imported asset at %s, got %d", remotePath, len(found))
+	}
+	if found[0].OwnerID != m.UserID || found[0].LibraryID != m.LibraryID || found[0].OriginalPath != remotePath {
+		return rep, errors.New("imported asset identity mismatch")
+	}
+	rep.AssetID = found[0].ID
+	rep.State = "ready"
+	rep.Error = ""
+	if err := r.DB.UpsertReplica(rep); err != nil {
+		return rep, err
+	}
+	r.Log.Info("asset replica ready", "logical_asset_id", rep.LogicalID, "member_id", m.ID, "immich_asset_id", rep.AssetID)
+	return rep, nil
+}
+
 func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m domain.Member) (domain.Replica, error) {
 	current, found, err := r.DB.Replica(logicalID, m.ID)
 	if err != nil {
@@ -497,6 +704,9 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 		}
 		originAsset, e := r.API.GetAsset(ctx, m, current.AssetID)
 		if e != nil {
+			if wasReady && !errors.Is(e, immich.ErrNotFound) {
+				return current, e
+			}
 			current.State = "api_error"
 			if errors.Is(e, immich.ErrNotFound) {
 				current.State = "source_missing"
@@ -530,6 +740,9 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 	}
 	asset, err := r.API.GetAsset(ctx, origin, logical.OriginAsset)
 	if err != nil {
+		if wasReady && !errors.Is(err, immich.ErrNotFound) {
+			return current, fmt.Errorf("source asset unavailable: %w", err)
+		}
 		if !found {
 			current = domain.Replica{LogicalID: logicalID, MemberID: m.ID, Role: "external_replica", LibraryID: m.LibraryID}
 		}
@@ -578,12 +791,18 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 			return current, errors.New("stored recipient asset identity mismatch")
 		}
 		if e == nil {
-			if e := r.FS.Ensure(asset.OriginalPath, path); e == nil {
-				return current, nil
+			if e := r.FS.Ensure(asset.OriginalPath, path); e != nil {
+				current.State = "error"
+				current.Error = e.Error()
+				_ = r.DB.UpsertReplica(current)
+				return current, e
 			}
-		} else if e != nil {
-			r.Log.Warn("recipient Immich asset missing; rediscovering", "logical_asset_id", logicalID, "member_id", m.ID, "error", e)
+			return current, nil
 		}
+		if !errors.Is(e, immich.ErrNotFound) {
+			return current, fmt.Errorf("check recipient asset: %w", e)
+		}
+		r.Log.Warn("recipient Immich asset missing; rediscovering", "logical_asset_id", logicalID, "member_id", m.ID, "error", e)
 	}
 	current = domain.Replica{LogicalID: logicalID, MemberID: m.ID, Role: "external_replica", Path: path, LibraryID: m.LibraryID, State: "pending_link"}
 	if err := r.DB.UpsertReplica(current); err != nil {
@@ -599,30 +818,7 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 	if err := r.DB.UpsertReplica(current); err != nil {
 		return current, err
 	}
-	if err := r.API.ScanLibrary(ctx, m); err != nil {
-		return current, fmt.Errorf("scan library: %w", err)
-	}
-	foundAssets, err := r.API.FindByPath(ctx, m, remotePath)
-	if err != nil {
-		return current, err
-	}
-	if len(foundAssets) == 0 {
-		return current, errPendingImport
-	}
-	if len(foundAssets) != 1 {
-		return current, fmt.Errorf("expected one imported asset at %s, got %d", remotePath, len(foundAssets))
-	}
-	if foundAssets[0].OwnerID != m.UserID || foundAssets[0].LibraryID != m.LibraryID || foundAssets[0].OriginalPath != remotePath {
-		return current, errors.New("imported asset identity mismatch")
-	}
-	current.AssetID = foundAssets[0].ID
-	current.State = "ready"
-	current.Error = ""
-	if err := r.DB.UpsertReplica(current); err != nil {
-		return current, err
-	}
-	r.Log.Info("asset replica ready", "logical_asset_id", logicalID, "member_id", m.ID, "immich_asset_id", current.AssetID)
-	return current, nil
+	return current, errPendingImport
 }
 
 type Action struct {

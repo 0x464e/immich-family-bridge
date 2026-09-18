@@ -11,6 +11,8 @@ services:
     pull_policy: always
     # Restart the long-running polling service after host or process restarts.
     restart: unless-stopped
+    # Let an in-flight reconciliation stop before Docker sends SIGKILL.
+    stop_grace_period: 45s
     # Run as the host UID:GID that can read originals and write state/recipients.
     # Defaults to 1000:1000; set PUID and PGID in .env when needed.
     user: "${PUID:-1000}:${PGID:-1000}"

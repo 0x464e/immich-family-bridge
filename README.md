@@ -2,7 +2,7 @@
 
 Immich Family Bridge keeps selected albums in sync across separate [Immich](https://immich.app/) accounts. Each member gets their own Immich asset IDs in their own albums and timeline. The bridge creates recipient files with hardlinks, imports them through member-owned [External Libraries](https://docs.immich.app/features/libraries/), and stores the mappings in SQLite. It neither copies media nor accesses Immich's database.
 
-**Project status:** This is an early release. It was exercised end to end with three accounts and ordinary JPEGs on a disposable Immich 3.2.2 instance backed by an NFS-mounted ZFS dataset. It has not been validated against a production library, and video and coupled media have not had live end-to-end testing. See the [validation record](docs/live-validation.md) and [current limits](#current-limits-and-production-pilot) before connecting important media.
+**Project status:** This is an early release. It was exercised end to end with three accounts, ordinary JPEGs, and a 1,200-image delayed-import batch on a disposable Immich 3.2.2 instance backed by an NFS-mounted ZFS dataset. It has not been validated against a 14,000-asset batch, and video and coupled media have not had live end-to-end testing. See the [validation record](docs/live-validation.md) and [current limits](#current-limits-and-production-pilot) before connecting important media.
 
 ## How it works
 
@@ -114,7 +114,7 @@ curl --fail-with-body -sS -X POST \
 
 The `PATCH` body should include the complete desired name and description; an omitted description becomes empty. Set a cover only after that logical asset is known and mapped. The bridge leaves the cover unchanged for a member until that member's asset ID is ready.
 
-Expect `pending_import` for a while after a scan; the next poll retries the lookup. Inspect `GET /api/replicas`, `GET /api/filesystem`, and the JSON container logs when an asset does not appear. A temporarily unavailable Immich API makes `/readyz` return 503. The bridge retains SQLite state and resumes on later cycles.
+Expect `pending_import` for a while after a scan; later polls retry the lookup even if Immich's thumbnail and machine-learning jobs are still queued. The bridge prepares up to 500 new replicas, looks up up to 500 pending imports, and audits up to 200 ready replicas per member and album per cycle. It requests at most one recipient library scan per member every 90 seconds and adds album assets in batches of 100. Inspect `GET /api/replicas`, `GET /api/filesystem`, and the JSON container logs when an asset does not appear. A temporarily unavailable Immich API makes `/readyz` return 503. The bridge retains SQLite state and resumes on later cycles.
 
 ## Current limits and production pilot
 

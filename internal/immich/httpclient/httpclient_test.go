@@ -3,6 +3,7 @@ package httpclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,10 +44,54 @@ func TestPinnedOpenAPISubset(t *testing.T) {
 			t.Fatalf("missing asset field %s", field)
 		}
 	}
-	for _, field := range []string{"originalPath", "libraryId", "albumIds", "cursor"} {
+	for _, field := range []string{"originalPath", "libraryId", "albumIds", "cursor", "page"} {
 		if spec.Components.Schemas["MetadataSearchDto"].Properties[field] == nil {
 			t.Fatalf("missing search field %s", field)
 		}
+	}
+	for _, field := range []string{"nextCursor", "nextPage"} {
+		if spec.Components.Schemas["SearchAssetResponseDto"].Properties[field] == nil {
+			t.Fatalf("missing search response field %s", field)
+		}
+	}
+}
+
+func TestSearchReadsEveryPage(t *testing.T) {
+	for _, mode := range []string{"page", "cursor"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				second := (mode == "page" && body["page"] == float64(2)) || (mode == "cursor" && body["cursor"] == "second")
+				items := make([]map[string]string, 0, 1000)
+				start, end := 0, 1000
+				if second {
+					start, end = 1000, 1200
+				}
+				for i := start; i < end; i++ {
+					items = append(items, map[string]string{"id": fmt.Sprintf("asset-%04d", i), "ownerId": "owner", "type": "IMAGE"})
+				}
+				assets := map[string]any{"items": items, "nextCursor": nil, "nextPage": nil}
+				if !second {
+					if mode == "page" {
+						assets["nextPage"] = "2"
+					} else {
+						assets["nextCursor"] = "second"
+					}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"assets": assets})
+			}))
+			defer server.Close()
+			c := New(server.URL + "/api")
+			assets, err := c.ListAlbumAssets(context.Background(), domain.Member{Key: "secret"}, "album")
+			if err != nil || len(assets) != 1200 || calls != 2 || assets[1199].ID != "asset-1199" {
+				t.Fatalf("pagination: count=%d calls=%d error=%v", len(assets), calls, err)
+			}
+		})
 	}
 }
 
