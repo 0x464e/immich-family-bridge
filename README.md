@@ -2,7 +2,7 @@
 
 Immich Family Bridge keeps selected albums in sync across separate [Immich](https://immich.app/) accounts. Each member gets their own Immich asset IDs in their own albums and timeline. The bridge creates recipient files with hardlinks, imports them through member-owned [External Libraries](https://docs.immich.app/features/libraries/), and stores the mappings in SQLite. It neither copies media nor accesses Immich's database.
 
-**Project status:** v0.1.0 is an early release. It was exercised end to end with three accounts and ordinary JPEGs on a disposable Immich 3.2.2 instance backed by an NFS-mounted ZFS dataset. It has not been validated against a production library, and video and coupled media have not had live end-to-end testing. See the [validation record](docs/live-validation.md) and [current limits](#current-limits-and-production-pilot) before connecting important media.
+**Project status:** This is an early release. It was exercised end to end with three accounts and ordinary JPEGs on a disposable Immich 3.2.2 instance backed by an NFS-mounted ZFS dataset. It has not been validated against a production library, and video and coupled media have not had live end-to-end testing. See the [validation record](docs/live-validation.md) and [current limits](#current-limits-and-production-pilot) before connecting important media.
 
 ## How it works
 
@@ -55,15 +55,15 @@ Test the actual deployment mount and UID/GID with a disposable source file befor
 
 1. Copy [config.example.yaml](config.example.yaml) to a private YAML file. Leave `dry_run: true` for the first deployment. Set `family_id`, the Immich API URL ending in `/api`, `source_root`, `source_mappings`, `bridge_root`, `immich_bridge_root`, the local SQLite path, and every member's bridge ID, Immich user ID, library ID, and key environment variable. Bridge IDs and the family ID become part of stable paths. The member set cannot be changed after database initialization without an explicit migration.
 2. Copy [secrets.env.example](secrets.env.example) to a private environment file. Supply the member keys, administrator key, and a random `FAMILYBRIDGE_API_TOKEN`. Keep both private files out of Git. API keys are not logged.
-3. Copy [.env.example](.env.example) to `.env` in this repository, or to another private Compose environment file. Set absolute host paths, the Immich Docker network name, and `PUID`/`PGID` if the default `1000:1000` cannot read sources and write recipient files and SQLite state. Leave `BRIDGE_MEDIA_MODE=ro` for the dry run. This file supplies Compose paths and options; the API keys belong in the separate file named by `BRIDGE_ENV_FILE`.
-4. Start the service from this repository:
+3. Copy [.env.example](.env.example) to `.env` in your deployment directory. Set absolute host paths, the Immich Docker network name, and `PUID`/`PGID` if the default `1000:1000` cannot read sources and write recipient files and SQLite state. Leave `BRIDGE_MEDIA_MODE=ro` for the dry run. This file supplies Compose paths and options; the API keys belong in the separate file named by `BRIDGE_ENV_FILE`.
+4. Copy [docker-compose.example.yaml](docker-compose.example.yaml) to `compose.yaml` in that directory, review its settings, and start the service:
 
    ~~~sh
-   docker compose --env-file .env -f docker-compose.example.yaml up --build -d
+   docker compose --env-file .env up -d
    curl --fail-with-body http://127.0.0.1:8081/readyz
    ~~~
 
-The supplied [docker-compose.example.yaml](docker-compose.example.yaml) builds the checked-out source and binds the bridge API to `127.0.0.1:8081`. Pass `-f docker-compose.example.yaml` explicitly because an example file is not loaded automatically. To run a published release, use `0x464e/immich-family-bridge:<release-version>` in your own Compose deployment instead of the local `build` directive. Pin a version tag for repeatable deployments.
+The example uses the published `0x464e/immich-family-bridge:latest` image from Docker Hub and binds the bridge API to `127.0.0.1:8081`. Its `pull_policy: always` checks for a newer image when you recreate the service. Replace `latest` with a specific release tag when you want predictable upgrades.
 
 `GET /healthz` reports whether the HTTP process responds. `GET /readyz` also checks SQLite, Immich reachability, member-key identity, and each recipient library's owner and import path. The service will not start if initial identity checks fail.
 

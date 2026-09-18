@@ -6,3 +6,5 @@ dist/
 .env
 *.private.env
 config.local.yaml
+/compose.dev.yaml
+/compose.yaml
