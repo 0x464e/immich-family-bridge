@@ -80,7 +80,7 @@ func setup(t *testing.T) (config.Config, *store.Store, *fake.Client, *Reconciler
 	bPath := filepath.Join(source, "b.jpg")
 	_ = os.WriteFile(aPath, []byte("photo a"), 0640)
 	_ = os.WriteFile(bPath, []byte("photo b"), 0640)
-	c := config.Config{FamilyID: "family", SourceRoot: source, SourceMappings: []config.SourceMapping{{ImmichRoot: source, LocalRoot: source}}, BridgeRoot: bridge, ImmichBridgeRoot: "/immich-bridge", Database: filepath.Join(root, "state", "db.sqlite"), APITokenEnv: "TEST_TOKEN", APIToken: "test", PollInterval: "30s", Members: []domain.Member{{ID: "alice", UserID: "user-a", LibraryID: "lib-a"}, {ID: "bob", UserID: "user-b", LibraryID: "lib-b"}, {ID: "carol", UserID: "user-c", LibraryID: "lib-c"}}}
+	c := config.Config{FamilyID: "family", TogetherAlbumName: "Together", SourceRoot: source, SourceMappings: []config.SourceMapping{{ImmichRoot: source, LocalRoot: source}}, BridgeRoot: bridge, ImmichBridgeRoot: "/immich-bridge", Database: filepath.Join(root, "state", "db.sqlite"), APITokenEnv: "TEST_TOKEN", APIToken: "test", PollInterval: "30s", Members: []domain.Member{{ID: "alice", UserID: "user-a", LibraryID: "lib-a"}, {ID: "bob", UserID: "user-b", LibraryID: "lib-b"}, {ID: "carol", UserID: "user-c", LibraryID: "lib-c"}}}
 	seed := fake.Seed{Assets: []fake.SeedAsset{{ID: "a1", Member: "alice", Path: aPath}, {ID: "b1", Member: "bob", Path: bPath}}, Albums: []fake.SeedAlbum{{ID: "trip", Member: "alice", Name: "Trip", AssetIDs: []string{"a1"}}, {ID: "best", Member: "alice", Name: "Best", AssetIDs: []string{"a1"}}}}
 	db, e := store.Open(c.Database)
 	if e != nil {
@@ -96,6 +96,152 @@ func setup(t *testing.T) (config.Config, *store.Store, *fake.Client, *Reconciler
 	}
 	r := New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return c, db, api, r
+}
+
+func TestTogetherIsProvisionedAfterDryRunWithoutDuplicates(t *testing.T) {
+	c, db, api, _ := setup(t)
+	c.DryRun = true
+	ctx := context.Background()
+	previewer := New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	id, err := previewer.EnsureTogether(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := previewer.EnsureTogether(ctx); err != nil || again != id {
+		t.Fatalf("Together was not stable across retries: %q, %v", again, err)
+	}
+	actions, err := previewer.DryRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creates := 0
+	for _, action := range actions {
+		if action.Kind == "create_album_replica" && action.AlbumID == id {
+			creates++
+		}
+	}
+	if creates != len(c.Members) {
+		t.Fatalf("dry-run did not preview one album per member: %+v", actions)
+	}
+	for _, m := range c.Members {
+		albums, err := api.ListAlbums(ctx, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, album := range albums {
+			if album.Name == "Together" {
+				t.Fatal("dry-run created an Immich album")
+			}
+		}
+	}
+	later, err := api.CreateAlbum(ctx, c.Members[0], "created-after-preview", "Together", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.DryRun = false
+	active := New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := active.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := active.Run(ctx); err != nil {
+		t.Fatal("repeat active cycle:", err)
+	}
+	if again, err := active.EnsureTogether(ctx); err != nil || again != id {
+		t.Fatalf("Together changed after activation: %q, %v", again, err)
+	}
+	replicas, err := db.AlbumReplicas(id)
+	if err != nil || replicas["alice"] != later.ID {
+		t.Fatalf("existing member album was not reused: %+v, %v", replicas, err)
+	}
+	stored, err := db.Albums()
+	if err != nil || len(stored) != 1 || stored[0].SystemKey != "together" {
+		t.Fatalf("unexpected logical albums: %+v, %v", stored, err)
+	}
+	for _, m := range c.Members {
+		albums, err := api.ListAlbums(ctx, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, album := range albums {
+			if album.Name == "Together" {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("member %s has %d Together albums", m.ID, count)
+		}
+	}
+}
+
+func TestTogetherAdoptsExistingAlbumsAndUsesConfiguredName(t *testing.T) {
+	c, db, api, _ := setup(t)
+	c.TogetherAlbumName = "Family Room"
+	c.DryRun = true
+	ctx := context.Background()
+	a, err := api.CreateAlbum(ctx, c.Members[0], "existing-a", "Family Room", "Alice's description")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := api.CreateAlbum(ctx, c.Members[1], "existing-b", "Family Room", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.AddAssets(ctx, c.Members[0], a.ID, []string{"a1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.AddAssets(ctx, c.Members[1], b.ID, []string{"b1"}); err != nil {
+		t.Fatal(err)
+	}
+	previewer := New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	manualID, err := previewer.Register(ctx, "alice", a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := previewer.EnsureTogether(ctx)
+	if err != nil || id != manualID {
+		t.Fatalf("manual Together album was not adopted: %q, %v", id, err)
+	}
+	reps, err := db.AlbumReplicas(id)
+	if err != nil || reps["alice"] != a.ID || reps["bob"] != b.ID || reps["carol"] != "" {
+		t.Fatalf("existing albums not attached: %+v, %v", reps, err)
+	}
+	c.DryRun = false
+	active := New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := active.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reps, err = db.AlbumReplicas(id)
+	if err != nil || len(reps) != len(c.Members) {
+		t.Fatalf("missing member album: %+v, %v", reps, err)
+	}
+	for _, m := range c.Members {
+		assets, err := api.ListAlbumAssets(ctx, m, reps[m.ID])
+		if err != nil || len(assets) != 2 {
+			t.Fatalf("member %s did not receive union: %+v, %v", m.ID, assets, err)
+		}
+		album, err := api.GetAlbum(ctx, m, reps[m.ID])
+		if err != nil || album.Name != "Family Room" {
+			t.Fatalf("member %s has wrong configured album name: %+v, %v", m.ID, album, err)
+		}
+	}
+}
+
+func TestTogetherRejectsAmbiguousExistingName(t *testing.T) {
+	c, db, api, r := setup(t)
+	ctx := context.Background()
+	for _, id := range []string{"first", "second"} {
+		if _, err := api.CreateAlbum(ctx, c.Members[1], id, "Together", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.EnsureTogether(ctx); err == nil {
+		t.Fatal("ambiguous member albums were accepted")
+	}
+	albums, err := db.Albums()
+	if err != nil || len(albums) != 0 {
+		t.Fatalf("ambiguous discovery wrote a logical album: %+v, %v", albums, err)
+	}
 }
 
 func TestNUserAlbumFlowRestartAndReferences(t *testing.T) {

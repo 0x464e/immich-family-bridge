@@ -76,6 +76,9 @@ members:
 			if c.Listen != "127.0.0.1:6773" {
 				t.Fatalf("Listen=%q, want default 127.0.0.1:6773", c.Listen)
 			}
+			if c.TogetherAlbumName != "Together" {
+				t.Fatalf("TogetherAlbumName=%q, want default Together", c.TogetherAlbumName)
+			}
 		})
 	}
 	if err := os.WriteFile(path, []byte("dry_run: false\n"+base), 0600); err != nil {
@@ -83,6 +86,12 @@ members:
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("accepted obsolete dry_run YAML field")
+	}
+	if err := os.WriteFile(path, []byte("together_album_name: Family Room\n"+base), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := Load(path); err != nil || c.TogetherAlbumName != "Family Room" {
+		t.Fatalf("custom Together album name not loaded: %q, %v", c.TogetherAlbumName, err)
 	}
 }
 
@@ -100,7 +109,7 @@ func TestSourceMappingsAndValidation(t *testing.T) {
 		FamilyID: "family", ImmichURL: "http://immich-server:2283/api", AdminKeyEnv: "ADMIN_KEY", AdminKey: "secret",
 		SourceRoot: media, SourceMappings: []SourceMapping{{ImmichRoot: "/data", LocalRoot: upload}, {ImmichRoot: "/external", LocalRoot: external}},
 		BridgeRoot: bridge, ImmichBridgeRoot: "/bridge", Database: filepath.Join(t.TempDir(), "bridge.sqlite"),
-		APITokenEnv: "API_TOKEN", APIToken: "secret", PollInterval: "30s",
+		APITokenEnv: "API_TOKEN", APIToken: "secret", PollInterval: "30s", TogetherAlbumName: "Together",
 		Members: []domain.Member{{ID: "alice", UserID: "u1", LibraryID: "l1", KeyEnv: "KEY1", Key: "secret"}, {ID: "bob", UserID: "u2", LibraryID: "l2", KeyEnv: "KEY2", Key: "secret"}},
 	}
 	if err := c.Validate(); err != nil {

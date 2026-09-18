@@ -48,7 +48,7 @@ func (s *Store) Migrate() error {
 	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
-	files := []string{"migrations/001_init.sql", "migrations/002_components.sql"}
+	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql"}
 	var max int
 	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&max); err != nil {
 		return err
@@ -130,7 +130,11 @@ func (s *Store) AddAlbum(family string, a domain.LogicalAlbum, replicas map[stri
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO logical_albums(id,family_id,name,description) VALUES(?,?,?,?)`, a.ID, family, a.Name, a.Description)
+	var systemKey any
+	if a.SystemKey != "" {
+		systemKey = a.SystemKey
+	}
+	_, err = tx.Exec(`INSERT INTO logical_albums(id,family_id,name,description,system_key) VALUES(?,?,?,?,?)`, a.ID, family, a.Name, a.Description, systemKey)
 	if err != nil {
 		return err
 	}
@@ -158,6 +162,21 @@ func (s *Store) SetCover(album, logical string) error {
 	}
 	_, err := s.DB.Exec(`UPDATE logical_albums SET cover_logical_asset_id=? WHERE id=?`, value, album)
 	return err
+}
+
+func (s *Store) SetAlbumSystemKey(album, key string) error {
+	result, err := s.DB.Exec(`UPDATE logical_albums SET system_key=? WHERE id=? AND (system_key IS NULL OR system_key=?)`, key, album, key)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return errors.New("album system key conflicts with existing mapping")
+	}
+	return nil
 }
 
 func (s *Store) UpdateOriginPath(logicalID, memberID, oldPath, newPath string) error {
@@ -192,7 +211,7 @@ func (s *Store) UpdateAlbum(id, name, description, cover string) error {
 }
 
 func (s *Store) Albums() ([]domain.LogicalAlbum, error) {
-	r, err := s.DB.Query(`SELECT id,name,description,COALESCE(cover_logical_asset_id,''),initialized FROM logical_albums ORDER BY name,id`)
+	r, err := s.DB.Query(`SELECT id,name,description,COALESCE(cover_logical_asset_id,''),initialized,COALESCE(system_key,'') FROM logical_albums ORDER BY name,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +220,7 @@ func (s *Store) Albums() ([]domain.LogicalAlbum, error) {
 	for r.Next() {
 		var a domain.LogicalAlbum
 		var init int
-		if err := r.Scan(&a.ID, &a.Name, &a.Description, &a.CoverID, &init); err != nil {
+		if err := r.Scan(&a.ID, &a.Name, &a.Description, &a.CoverID, &init, &a.SystemKey); err != nil {
 			return nil, err
 		}
 		a.Initialized = init != 0
