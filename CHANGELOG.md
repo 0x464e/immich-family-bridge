@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/0x464e/immich-family-bridge/compare/v0.4.1...v0.4.2) (2026-09-18)
+
+
+### Bug Fixes
+
+* report pending imports as expected progress ([a79d6a6](https://github.com/0x464e/immich-family-bridge/commit/a79d6a6bf6569669aecfd14ddc76aa0f12e8d9fe))
+
 ## [0.4.1](https://github.com/0x464e/immich-family-bridge/compare/v0.4.0...v0.4.1) (2026-09-18)
 
 
