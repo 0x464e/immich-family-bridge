@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.4](https://github.com/0x464e/immich-family-bridge/compare/v0.4.3...v0.4.4) (2026-09-18)
+
+
+### Bug Fixes
+
+* make crash recovery durability explicit ([291d989](https://github.com/0x464e/immich-family-bridge/commit/291d989fa78308353e0983ca84cfc30ebdf6c0d5))
+
 ## [0.4.3](https://github.com/0x464e/immich-family-bridge/compare/v0.4.2...v0.4.3) (2026-09-18)
 
 
