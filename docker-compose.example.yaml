@@ -1,14 +1,14 @@
-# Example deployment for building this checkout locally. Copy or adapt it for
-# your host. Supply Compose variables from .env (copy .env.example), and keep
-# API keys in a separate private file named by BRIDGE_ENV_FILE.
+# Copy this file for a deployment of the published Docker Hub image. Configure
+# the paths and network in .env (from .env.example), the bridge in a private
+# config YAML, and API keys in a private file named by BRIDGE_ENV_FILE.
 services:
   # The bridge joins Immich's network to call its API and request library scans.
   familybridge:
-    # Build the Dockerfile in this repository; run from the repository root.
-    build: .
-    # Local image name for this build. Replace with a pinned published image tag
-    # and remove build if deploying a release without building from source.
-    image: immich-family-bridge:local
+    # Published multi-architecture image. The latest tag follows new releases;
+    # replace it with a version tag if you need to control upgrade timing.
+    image: 0x464e/immich-family-bridge:latest
+    # Fetch the current image when this service is created or updated.
+    pull_policy: always
     # Run as the host UID:GID that can read originals and write state/recipients.
     # Defaults to 1000:1000; set PUID and PGID in .env when needed.
     user: "${PUID:-1000}:${PGID:-1000}"
