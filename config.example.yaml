@@ -3,11 +3,6 @@
 # mappings, so keep it unchanged after the bridge has created replicas.
 family_id: my-family
 
-# Preview reconciliation without writing files or changing Immich. The bridge
-# still writes its own SQLite state (for example, registered albums). Start with
-# true; set false only after reviewing the proposed operations and mount layout.
-dry_run: true
-
 # Immich API base URL as reached from the bridge container. Include the /api
 # suffix. A Compose service name works when both containers share a network.
 immich_url: http://immich-server:2283/api

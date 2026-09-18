@@ -32,8 +32,20 @@ func TestPersistentDryRunDoesNotWriteImmichOrMedia(t *testing.T) {
 		t.Fatalf("dry-run registration created remote albums: %+v, %v", reps, err)
 	}
 	preview, err := r.DryRun(ctx)
-	if err != nil || preview["count"].(int) == 0 {
+	if err != nil || len(preview) == 0 {
 		t.Fatalf("missing dry-run actions: %+v, %v", preview, err)
+	}
+	var discovered, shared bool
+	for _, action := range preview {
+		if action.Kind == "discover_origin" && action.MemberID == "alice" && action.ImmichAssetID == "a1" {
+			discovered = true
+		}
+		if action.Kind == "link_and_import" && action.SourceMemberID == "alice" && action.MemberID == "bob" && action.ImmichAssetID == "a1" {
+			shared = true
+		}
+	}
+	if !discovered || !shared {
+		t.Fatalf("dry run did not identify the new source and recipient: %+v", preview)
 	}
 	if err := r.Run(ctx); !errors.Is(err, ErrDryRunMode) {
 		t.Fatalf("active reconciliation in dry-run mode: %v", err)
@@ -101,7 +113,7 @@ func TestNUserAlbumFlowRestartAndReferences(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if preview["count"].(int) == 0 {
+	if len(preview) == 0 {
 		t.Fatal("dry run missed initial work")
 	}
 	before, _ := db.Replicas()
