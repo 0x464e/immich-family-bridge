@@ -58,6 +58,45 @@ func TestPinnedOpenAPISubset(t *testing.T) {
 	}
 }
 
+func TestSessionUserReplaysOnlyBrowserCookie(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/users/me" {
+			t.Fatalf("unexpected session request: %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Cookie") != "immich_access_token=session" {
+			t.Fatalf("cookie = %q", r.Header.Get("Cookie"))
+		}
+		if r.Header.Get("x-api-key") != "" {
+			t.Fatal("session lookup sent an API key")
+		}
+		_, _ = w.Write([]byte(`{"id":"user-id"}`))
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	c.AdminKey = "admin"
+	if got, err := c.SessionUser(context.Background(), "immich_access_token=session"); err != nil || got != "user-id" {
+		t.Fatalf("SessionUser = %q, %v", got, err)
+	}
+}
+
+func TestSessionUserRejectsUnauthenticatedAndMalformedResponses(t *testing.T) {
+	for _, body := range []string{"", `{"id":""}`} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if body == "" {
+					http.Error(w, "unauthenticated", http.StatusUnauthorized)
+					return
+				}
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+			if _, err := New(server.URL+"/api").SessionUser(context.Background(), "session"); err == nil {
+				t.Fatal("accepted invalid session response")
+			}
+		})
+	}
+}
+
 func TestSearchReadsEveryPage(t *testing.T) {
 	for _, mode := range []string{"page", "cursor"} {
 		t.Run(mode, func(t *testing.T) {

@@ -70,6 +70,12 @@ listen: 0.0.0.0:6773
 # container environment, not in this file.
 api_token_env: FAMILYBRIDGE_API_TOKEN
 
+# Name of an environment variable containing a separate URL-safe random token
+# used only by Traefik's private ForwardAuth request. Traefik sends it as the
+# password of HTTP Basic authentication to /forward-auth; do not reuse
+# api_token_env.
+forward_auth_token_env: FAMILYBRIDGE_FORWARDAUTH_TOKEN
+
 # Time between reconciliation polls, in Go duration syntax (such as 30s or 5m).
 # Must be at least 1s. The default is 30s when omitted.
 poll_interval: 30s

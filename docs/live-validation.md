@@ -53,3 +53,26 @@ shared in both albums. Unit tests also cover legacy secondary-only membership
 backfill, conflicting edits, a failed album read, a failed remote write, dry-run
 promotion without writes, and delaying secondary album additions until the
 recipient's Together membership has been written.
+
+## Transparent cross-account links (2026-09-20)
+
+Using the same disposable Immich 3.2.2 instance, we rebuilt the bridge from
+the current checkout and placed a short-lived Traefik 3.5.3 proxy in front of
+it. An authenticated User 2 request for a known User 1 `/photos/<uuid>` link
+received a `307` to User 2's ready replica, retained its query string, and
+followed the relative redirect to Immich's normal photo-page response. The
+target link did not redirect again. The reverse User 1-to-User 2 request also
+translated correctly, while an unknown UUID and an invalid Immich session
+passed through with the resolver's `204` result. This exposed two Traefik
+configuration requirements now reflected in the deployment: express GET and
+HEAD as separate `Method` matchers, and set `preserveLocationHeader` so a
+relative bridge redirect is not resolved against the private ForwardAuth URL.
+
+The same rebuilt bridge and short-lived proxy were then tested with the
+bridge-managed Together albums. An authenticated User 2 request for User 1's
+`/albums/<uuid>?from=traefik-e2e` link received a relative `307` to User 2's
+matching mirror album with the query string unchanged; following it reached
+Immich with HTTP 200. Direct bridge checks also verified the reverse direction,
+that a member's own mirror-album link returns `204`, and that an unregistered
+album returns `204`. The album resolver queries only `album_replicas`, so it
+does not translate ordinary Immich album links.

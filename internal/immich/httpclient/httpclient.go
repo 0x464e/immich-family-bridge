@@ -89,6 +89,43 @@ func (c *Client) Me(ctx context.Context, m domain.Member) (string, error) {
 	e := c.request(ctx, m.Key, "GET", "/users/me", nil, &v)
 	return v.ID, e
 }
+
+// SessionUser returns the Immich user identified by a browser session cookie.
+// It deliberately does not use an API key: this is used only by the narrowly
+// scoped link resolver, which replays the browser's existing Immich session.
+func (c *Client) SessionUser(ctx context.Context, cookie string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/users/me", nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Cookie", cookie)
+	request.Header.Set("Accept", "application/json")
+	client := http.DefaultClient
+	if c.HTTP != nil {
+		copy := *c.HTTP
+		client = &copy
+	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("immich session identity: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return "", fmt.Errorf("immich session identity: HTTP %d", response.StatusCode)
+	}
+	var user struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&user); err != nil {
+		return "", fmt.Errorf("immich session identity: %w", err)
+	}
+	if user.ID == "" {
+		return "", errors.New("immich session identity response omitted user id")
+	}
+	return user.ID, nil
+}
 func (c *Client) Permissions(ctx context.Context, m domain.Member) ([]string, error) {
 	var v struct {
 		Permissions []string `json:"permissions"`

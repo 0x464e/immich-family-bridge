@@ -32,6 +32,7 @@ services:
     # only when the media mount is rw and you are ready for Immich/file writes.
     environment:
       FAMILYBRIDGE_DRY_RUN: ${FAMILYBRIDGE_DRY_RUN:-true}
+      FAMILYBRIDGE_FORWARDAUTH_TOKEN: ${FAMILYBRIDGE_FORWARDAUTH_TOKEN:?Set a separate private ForwardAuth token}
     # All paths on the left are absolute paths on the Docker host. Paths on the
     # right are inside the bridge container and match config.example.yaml.
     volumes:

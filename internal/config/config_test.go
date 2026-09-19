@@ -26,7 +26,7 @@ func TestLoadDefaultsToDryRun(t *testing.T) {
 	if err := os.Mkdir(upload, 0750); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"TEST_ADMIN_KEY", "TEST_API_TOKEN", "TEST_ALICE_KEY", "TEST_BOB_KEY"} {
+	for _, name := range []string{"TEST_ADMIN_KEY", "TEST_API_TOKEN", "TEST_FORWARDAUTH_TOKEN", "TEST_ALICE_KEY", "TEST_BOB_KEY"} {
 		t.Setenv(name, "test-secret")
 	}
 	base := fmt.Sprintf(`family_id: family
@@ -40,6 +40,7 @@ bridge_root: %s
 immich_bridge_root: /bridge
 database: %s
 api_token_env: TEST_API_TOKEN
+forward_auth_token_env: TEST_FORWARDAUTH_TOKEN
 members:
   - id: alice
     user_id: u-alice
@@ -109,7 +110,7 @@ func TestSourceMappingsAndValidation(t *testing.T) {
 		FamilyID: "family", ImmichURL: "http://immich-server:2283/api", AdminKeyEnv: "ADMIN_KEY", AdminKey: "secret",
 		SourceRoot: media, SourceMappings: []SourceMapping{{ImmichRoot: "/data", LocalRoot: upload}, {ImmichRoot: "/external", LocalRoot: external}},
 		BridgeRoot: bridge, ImmichBridgeRoot: "/bridge", Database: filepath.Join(t.TempDir(), "bridge.sqlite"),
-		APITokenEnv: "API_TOKEN", APIToken: "secret", PollInterval: "30s", TogetherAlbumName: "Together",
+		APITokenEnv: "API_TOKEN", APIToken: "secret", ForwardAuthTokenEnv: "FORWARDAUTH_TOKEN", ForwardAuthToken: "secret", PollInterval: "30s", TogetherAlbumName: "Together",
 		Members: []domain.Member{{ID: "alice", UserID: "u1", LibraryID: "l1", KeyEnv: "KEY1", Key: "secret"}, {ID: "bob", UserID: "u2", LibraryID: "l2", KeyEnv: "KEY2", Key: "secret"}},
 	}
 	if err := c.Validate(); err != nil {
@@ -132,5 +133,10 @@ func TestSourceMappingsAndValidation(t *testing.T) {
 	c.SourceMappings[1].LocalRoot = bridge
 	if err := c.Validate(); err == nil {
 		t.Fatal("accepted a bridge output directory as a source mapping")
+	}
+	c.SourceMappings[1].LocalRoot = external
+	c.ForwardAuthToken = "not url-safe"
+	if err := c.Validate(); err == nil {
+		t.Fatal("accepted non URL-safe forward-auth token")
 	}
 }

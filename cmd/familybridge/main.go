@@ -81,7 +81,7 @@ func main() {
 		defer close(pollingDone)
 		runPolling(ctx, interval, runCycle)
 	}()
-	srv := &http.Server{Addr: c.Listen, Handler: (&httpapi.Server{C: c, DB: db, R: r}).Handler(), ReadHeaderTimeout: 5 * time.Second,
+	srv := &http.Server{Addr: c.Listen, Handler: (&httpapi.Server{C: c, DB: db, R: r, Session: api}).Handler(), ReadHeaderTimeout: 5 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	shutdownDone := make(chan struct{})
 	go func() {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -75,6 +76,86 @@ func TestLibraryScanClaimIsPersistentAndAtomic(t *testing.T) {
 	}
 	if ok, err := s.ClaimLibraryScan("a", now.Add(32*time.Second), "after", time.Minute); err != nil || ok {
 		t.Fatalf("duplicate claim = %v, %v", ok, err)
+	}
+}
+
+func TestResolveActiveReplica(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "bridge.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	members := []domain.Member{{ID: "alice", UserID: "u-alice", LibraryID: "l-alice"}, {ID: "bob", UserID: "u-bob", LibraryID: "l-bob"}}
+	if err := s.Init("family", members); err != nil {
+		t.Fatal(err)
+	}
+	origin := "11111111-1111-1111-1111-111111111111"
+	target := "22222222-2222-2222-2222-222222222222"
+	logical, err := s.EnsureOrigin("family", "alice", domain.Asset{ID: origin, OwnerID: "u-alice", OriginalPath: "/fixture/a.jpg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertReplica(domain.Replica{LogicalID: logical, MemberID: "bob", AssetID: target, Role: "external_replica", State: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO sharing_sources(logical_asset_id,source_kind,source_id) VALUES(?,'album','together')`, logical); err != nil {
+		t.Fatal(err)
+	}
+	if got, found, err := s.ResolveActiveReplica(context.Background(), origin, "u-bob"); err != nil || !found || got != target {
+		t.Fatalf("resolved target = %q, %v, %v", got, found, err)
+	}
+	if got, found, err := s.ResolveActiveReplica(context.Background(), origin, "u-alice"); err != nil || !found || got != origin {
+		t.Fatalf("resolved origin = %q, %v, %v", got, found, err)
+	}
+	if _, found, err := s.ResolveActiveReplica(context.Background(), "33333333-3333-3333-3333-333333333333", "u-bob"); err != nil || found {
+		t.Fatalf("unknown asset resolved: %v, %v", found, err)
+	}
+	if _, err := s.DB.Exec(`DELETE FROM sharing_sources WHERE logical_asset_id=?`, logical); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := s.ResolveActiveReplica(context.Background(), origin, "u-bob"); err != nil || found {
+		t.Fatalf("unshared asset resolved: %v, %v", found, err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO sharing_sources(logical_asset_id,source_kind,source_id) VALUES(?,'album','together')`, logical); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertReplica(domain.Replica{LogicalID: logical, MemberID: "bob", AssetID: target, Role: "external_replica", State: "pending_removal"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := s.ResolveActiveReplica(context.Background(), origin, "u-bob"); err != nil || found {
+		t.Fatalf("non-ready asset resolved: %v, %v", found, err)
+	}
+}
+
+func TestResolveMirrorAlbum(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "bridge.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	members := []domain.Member{{ID: "alice", UserID: "u-alice", LibraryID: "l-alice"}, {ID: "bob", UserID: "u-bob", LibraryID: "l-bob"}}
+	if err := s.Init("family", members); err != nil {
+		t.Fatal(err)
+	}
+	origin := "11111111-1111-1111-1111-111111111111"
+	target := "22222222-2222-2222-2222-222222222222"
+	if err := s.AddAlbum("family", domain.LogicalAlbum{ID: "together", Name: "Together"}, map[string]string{"alice": origin, "bob": target}); err != nil {
+		t.Fatal(err)
+	}
+	if got, found, err := s.ResolveMirrorAlbum(context.Background(), origin, "u-bob"); err != nil || !found || got != target {
+		t.Fatalf("resolved target = %q, %v, %v", got, found, err)
+	}
+	if got, found, err := s.ResolveMirrorAlbum(context.Background(), origin, "u-alice"); err != nil || !found || got != origin {
+		t.Fatalf("resolved origin = %q, %v, %v", got, found, err)
+	}
+	if _, found, err := s.ResolveMirrorAlbum(context.Background(), "33333333-3333-3333-3333-333333333333", "u-bob"); err != nil || found {
+		t.Fatalf("unknown album resolved: %v, %v", found, err)
+	}
+	if _, err := s.DB.Exec(`UPDATE album_replicas SET state='pending_create' WHERE member_id='bob'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := s.ResolveMirrorAlbum(context.Background(), origin, "u-bob"); err != nil || found {
+		t.Fatalf("non-ready album resolved: %v, %v", found, err)
 	}
 }
 

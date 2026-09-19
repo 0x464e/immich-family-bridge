@@ -55,7 +55,7 @@ Test the actual deployment mount and UID/GID with a disposable source file befor
 ## Configure and run
 
 1. Copy [config.example.yaml](config.example.yaml) to a private YAML file. Set `family_id`, `together_album_name`, the Immich API URL ending in `/api`, `source_root`, `source_mappings`, `bridge_root`, `immich_bridge_root`, the local SQLite path, and every member's bridge ID, Immich user ID, library ID, and key environment variable. Bridge IDs and the family ID become part of stable paths. The member set cannot be changed after database initialization without an explicit migration.
-2. Copy [secrets.env.example](secrets.env.example) to a private environment file. Supply the member keys, administrator key, and a random `FAMILYBRIDGE_API_TOKEN`. Keep both private files out of Git. API keys are not logged.
+2. Copy [secrets.env.example](secrets.env.example) to a private environment file. Supply the member keys, administrator key, a random `FAMILYBRIDGE_API_TOKEN`, and a distinct URL-safe `FAMILYBRIDGE_FORWARDAUTH_TOKEN`. Keep both private files out of Git. API keys are not logged.
 3. Copy [.env.example](.env.example) to `.env` in your deployment directory. Set absolute host paths, the Immich Docker network name, and `PUID`/`PGID` if the default `1000:1000` cannot read sources and write recipient files and SQLite state. Leave `FAMILYBRIDGE_DRY_RUN=true` and `BRIDGE_MEDIA_MODE=ro` for the first deployment. This file supplies Compose paths and options; the API keys belong in the separate file named by `BRIDGE_ENV_FILE`.
 4. Copy [docker-compose.example.yaml](docker-compose.example.yaml) to `compose.yaml` in that directory, review its settings, and start the service:
 
@@ -79,6 +79,12 @@ Confirm the mode with the authenticated `GET /api/status` endpoint before regist
 ## Register albums and inspect status
 
 The internal API requires `Authorization: Bearer <FAMILYBRIDGE_API_TOKEN>` for every `/api/` endpoint. Keep it on localhost or behind an authenticated private network. In active mode, album registration creates missing member albums immediately; polling or a manual reconciliation then fills them. In dry-run mode, registration only saves the mapping in SQLite.
+
+## Transparent media and mirror-album links
+
+The `GET /forward-auth` endpoint is intended only for a private Traefik ForwardAuth middleware on direct `/photos/<uuid>` and bridge-managed `/albums/<uuid>` page requests. Traefik sends a dedicated Basic-auth token plus the browser's `Cookie` header. The bridge asks Immich's internal `/api/users/me` endpoint to identify that existing session, then redirects active shared media to the current member's ready asset replica, or a recorded mirror album to that member's matching album. It never decodes or logs the browser cookie. Missing sessions, expired links, unknown members, non-bridge assets or albums, and lookup failures return `204` so Traefik continues to Immich normally; this preserves Immich's login and deep-link recovery flow.
+
+Set `forward_auth_token_env` to a distinct secret such as `FAMILYBRIDGE_FORWARDAUTH_TOKEN`. The bridge endpoint must be reachable only from Traefik's trusted network, and Traefik must restrict its router to exact UUID-shaped `/photos/...` and `/albums/...` `GET`/`HEAD` requests. Configure Traefik ForwardAuth with `preserveLocationHeader: true` so it returns the bridge's relative redirect unchanged. The handler repeats route validation defensively and emits only a relative `307` redirect with the original query string. Album redirects resolve only IDs in the bridge's `album_replicas` records; unrelated Immich albums pass through untouched.
 
 ~~~sh
 # Set BRIDGE_TOKEN to the private token from your secrets file.

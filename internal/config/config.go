@@ -21,26 +21,29 @@ type SourceMapping struct {
 }
 
 type Config struct {
-	FamilyID          string          `yaml:"family_id"`
-	DryRun            bool            `yaml:"-"`
-	ImmichURL         string          `yaml:"immich_url"`
-	AdminKeyEnv       string          `yaml:"admin_key_env"`
-	AdminKey          string          `yaml:"-"`
-	SourceRoot        string          `yaml:"source_root"`
-	SourceMappings    []SourceMapping `yaml:"source_mappings"`
-	BridgeRoot        string          `yaml:"bridge_root"`
-	ImmichBridgeRoot  string          `yaml:"immich_bridge_root"`
-	Database          string          `yaml:"database"`
-	Listen            string          `yaml:"listen"`
-	APITokenEnv       string          `yaml:"api_token_env"`
-	APIToken          string          `yaml:"-"`
-	PollInterval      string          `yaml:"poll_interval"`
-	TogetherAlbumName string          `yaml:"together_album_name"`
-	RemoveUnshared    bool            `yaml:"remove_unshared_replicas"`
-	Members           []domain.Member `yaml:"members"`
+	FamilyID            string          `yaml:"family_id"`
+	DryRun              bool            `yaml:"-"`
+	ImmichURL           string          `yaml:"immich_url"`
+	AdminKeyEnv         string          `yaml:"admin_key_env"`
+	AdminKey            string          `yaml:"-"`
+	SourceRoot          string          `yaml:"source_root"`
+	SourceMappings      []SourceMapping `yaml:"source_mappings"`
+	BridgeRoot          string          `yaml:"bridge_root"`
+	ImmichBridgeRoot    string          `yaml:"immich_bridge_root"`
+	Database            string          `yaml:"database"`
+	Listen              string          `yaml:"listen"`
+	APITokenEnv         string          `yaml:"api_token_env"`
+	APIToken            string          `yaml:"-"`
+	ForwardAuthTokenEnv string          `yaml:"forward_auth_token_env"`
+	ForwardAuthToken    string          `yaml:"-"`
+	PollInterval        string          `yaml:"poll_interval"`
+	TogetherAlbumName   string          `yaml:"together_album_name"`
+	RemoveUnshared      bool            `yaml:"remove_unshared_replicas"`
+	Members             []domain.Member `yaml:"members"`
 }
 
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+var urlSafeToken = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
@@ -70,6 +73,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.APITokenEnv != "" {
 		c.APIToken = os.Getenv(c.APITokenEnv)
+	}
+	if c.ForwardAuthTokenEnv != "" {
+		c.ForwardAuthToken = os.Getenv(c.ForwardAuthTokenEnv)
 	}
 	if c.AdminKeyEnv != "" {
 		c.AdminKey = os.Getenv(c.AdminKeyEnv)
@@ -103,8 +109,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("%s must be a clean absolute non-root path", name)
 		}
 	}
-	if c.APITokenEnv == "" || c.APIToken == "" || c.AdminKeyEnv == "" || c.AdminKey == "" {
-		return errors.New("API token and admin key must resolve from environment variables")
+	if c.APITokenEnv == "" || c.APIToken == "" || c.ForwardAuthTokenEnv == "" || c.ForwardAuthToken == "" || c.AdminKeyEnv == "" || c.AdminKey == "" {
+		return errors.New("API token, forward-auth token, and admin key must resolve from environment variables")
+	}
+	if !urlSafeToken.MatchString(c.ForwardAuthToken) {
+		return errors.New("forward-auth token must use only URL-safe base64 characters")
 	}
 	if c.SourceRoot == c.BridgeRoot || inside(c.BridgeRoot, c.SourceRoot) {
 		return errors.New("bridge_root must not contain source_root")

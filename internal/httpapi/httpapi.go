@@ -5,7 +5,9 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,10 +17,21 @@ import (
 )
 
 type Server struct {
-	C  config.Config
-	DB *store.Store
-	R  *reconcile.Reconciler
+	C       config.Config
+	DB      *store.Store
+	R       *reconcile.Reconciler
+	Session SessionIdentity
 }
+
+// SessionIdentity resolves an Immich browser session without interpreting its
+// cookie. The concrete HTTP adapter replays the cookie to Immich /users/me.
+type SessionIdentity interface {
+	SessionUser(context.Context, string) (string, error)
+}
+
+var immichAssetID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+const resolverTimeout = 2 * time.Second
 
 func write(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -28,6 +41,7 @@ func write(w http.ResponseWriter, status int, v any) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { write(w, 200, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("GET /forward-auth", s.forwardAuth)
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
@@ -175,6 +189,78 @@ func (s *Server) Handler() http.Handler {
 		api.ServeHTTP(w, r)
 	}))
 	return mux
+}
+
+// forwardAuth is called only by Traefik's narrowly matched ForwardAuth
+// middleware. It fails open for every resolver failure so ordinary Immich
+// handling (including its login/deep-link flow) remains authoritative.
+func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request) {
+	if !s.validForwardAuthCredential(r) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="immich-family-bridge"`)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	resource, requestedID, rawQuery, ok := forwardedImmichLink(r.Header.Get("X-Forwarded-Uri"))
+	if !ok || s.Session == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	cookie := r.Header.Get("Cookie")
+	if cookie == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), resolverTimeout)
+	defer cancel()
+	userID, err := s.Session.SessionUser(ctx, cookie)
+	if err != nil || !s.isMemberUser(userID) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var targetID string
+	var found bool
+	if resource == "photos" {
+		targetID, found, err = s.DB.ResolveActiveReplica(ctx, requestedID, userID)
+	} else {
+		targetID, found, err = s.DB.ResolveMirrorAlbum(ctx, requestedID, userID)
+	}
+	if err != nil || !found || targetID == requestedID || !immichAssetID.MatchString(targetID) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Location", "/"+resource+"/"+targetID+rawQuery)
+	w.WriteHeader(http.StatusTemporaryRedirect)
+}
+
+func (s *Server) validForwardAuthCredential(r *http.Request) bool {
+	username, token, ok := r.BasicAuth()
+	return ok && username == "familybridge" && s.C.ForwardAuthToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.C.ForwardAuthToken)) == 1
+}
+
+func (s *Server) isMemberUser(userID string) bool {
+	for _, member := range s.C.Members {
+		if member.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func forwardedImmichLink(rawURI string) (resource, id, rawQuery string, ok bool) {
+	u, err := url.ParseRequestURI(rawURI)
+	if err != nil || u.IsAbs() || u.Fragment != "" || u.RawPath != "" || !strings.HasPrefix(u.Path, "/") {
+		return "", "", "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(parts) != 2 || (parts[0] != "photos" && parts[0] != "albums") || !immichAssetID.MatchString(parts[1]) {
+		return "", "", "", false
+	}
+	resource, id = parts[0], parts[1]
+	if u.RawQuery == "" {
+		return resource, id, "", true
+	}
+	return resource, id, "?" + u.RawQuery, true
 }
 
 func (s *Server) originMember(id string) string {

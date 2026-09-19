@@ -310,6 +310,51 @@ func (s *Store) FindReplicaAsset(member, asset string) (string, bool, error) {
 	return id, err == nil, err
 }
 
+// ResolveActiveReplica finds the ready asset replica for an authenticated
+// Immich user. A logical asset is resolvable only while it is actively shared;
+// pending-removal replicas must retain Immich's ordinary access behaviour.
+func (s *Store) ResolveActiveReplica(ctx context.Context, requestedAssetID, userID string) (string, bool, error) {
+	var target string
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT target.immich_asset_id
+		FROM asset_replicas AS requested
+		JOIN asset_replicas AS target ON target.logical_asset_id=requested.logical_asset_id
+		JOIN members AS target_member ON target_member.id=target.member_id
+		WHERE requested.immich_asset_id=?
+		  AND target_member.user_id=?
+		  AND target.immich_asset_id IS NOT NULL
+		  AND target.immich_asset_id != ''
+		  AND target.state='ready'
+		  AND EXISTS (SELECT 1 FROM sharing_sources WHERE logical_asset_id=requested.logical_asset_id)
+		LIMIT 1`, requestedAssetID, userID).Scan(&target)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return target, err == nil, err
+}
+
+// ResolveMirrorAlbum finds the ready bridge-managed album replica for an
+// authenticated Immich user. Only IDs recorded in album_replicas are
+// resolvable, so ordinary Immich albums always keep their normal behaviour.
+func (s *Store) ResolveMirrorAlbum(ctx context.Context, requestedAlbumID, userID string) (string, bool, error) {
+	var target string
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT target.immich_album_id
+		FROM album_replicas AS requested
+		JOIN album_replicas AS target ON target.logical_album_id=requested.logical_album_id
+		JOIN members AS target_member ON target_member.id=target.member_id
+		WHERE requested.immich_album_id=?
+		  AND target_member.user_id=?
+		  AND target.immich_album_id IS NOT NULL
+		  AND target.immich_album_id != ''
+		  AND target.state='ready'
+		LIMIT 1`, requestedAlbumID, userID).Scan(&target)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return target, err == nil, err
+}
+
 func (s *Store) EnsureOrigin(family, member string, a domain.Asset) (string, error) {
 	var id string
 	err := s.DB.QueryRow(`SELECT id FROM logical_assets WHERE origin_immich_asset_id=?`, a.ID).Scan(&id)
