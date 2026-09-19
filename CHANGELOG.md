@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.7](https://github.com/0x464e/immich-family-bridge/compare/v0.4.6...v0.4.7) (2026-09-19)
+
+
+### Bug Fixes
+
+* make Together authoritative for shared media ([01c5eef](https://github.com/0x464e/immich-family-bridge/commit/01c5eef8cb36430d68e695cd91b21130093d6e60))
+
 ## [0.4.6](https://github.com/0x464e/immich-family-bridge/compare/v0.4.5...v0.4.6) (2026-09-19)
 
 
