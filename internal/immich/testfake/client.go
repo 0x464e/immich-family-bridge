@@ -167,6 +167,9 @@ func (f *Client) Me(_ context.Context, m domain.Member) (string, error) {
 	}
 	return m.UserID, nil
 }
+func (f *Client) Permissions(context.Context, domain.Member) ([]string, error) {
+	return []string{"all"}, nil
+}
 func (f *Client) GetLibrary(_ context.Context, m domain.Member) (domain.Library, error) {
 	path := filepath.Join(f.config.ImmichBridgeRoot, "families", f.config.FamilyID, "users", m.ID, "assets")
 	return domain.Library{ID: m.LibraryID, OwnerID: m.UserID, ImportPaths: []string{path}}, nil
@@ -267,6 +270,27 @@ func (f *Client) AddAssets(_ context.Context, m domain.Member, id string, assets
 }
 func (f *Client) RemoveAssets(_ context.Context, m domain.Member, id string, assets []string) error {
 	return f.change(m, id, assets, false)
+}
+func (f *Client) DeleteAssets(_ context.Context, m domain.Member, assets []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return err
+	}
+	for _, id := range assets {
+		asset, ok := f.state.Assets[id]
+		if !ok {
+			continue
+		}
+		if asset.OwnerID != m.UserID || asset.LibraryID != m.LibraryID {
+			return fmt.Errorf("asset %s is not in %s recipient library", id, m.ID)
+		}
+		delete(f.state.Assets, id)
+		for _, membership := range f.state.Membership {
+			delete(membership, id)
+		}
+	}
+	return f.save()
 }
 func (f *Client) change(m domain.Member, id string, assets []string, add bool) error {
 	f.mu.Lock()

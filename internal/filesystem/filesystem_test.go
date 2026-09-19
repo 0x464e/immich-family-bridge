@@ -107,3 +107,42 @@ func TestReadOnlyLinkerRejectsLinkBeforeCreatingDirectories(t *testing.T) {
 		t.Fatalf("read-only linker created directory: %v", err)
 	}
 }
+
+func TestRemoveOnlyExpectedHardlink(t *testing.T) {
+	root := t.TempDir()
+	sourceRoot := filepath.Join(root, "source")
+	bridgeRoot := filepath.Join(root, "bridge")
+	if err := os.MkdirAll(sourceRoot, 0750); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(sourceRoot, "source.jpg")
+	destination := filepath.Join(bridgeRoot, "recipient.jpg")
+	if err := os.WriteFile(source, []byte("source"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	linker := Linker{SourceRoot: sourceRoot, BridgeRoot: bridgeRoot}
+	if err := linker.Ensure(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := linker.Remove(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination remains: %v", err)
+	}
+	if got, err := os.ReadFile(source); err != nil || string(got) != "source" {
+		t.Fatalf("source changed: %q, %v", got, err)
+	}
+	if err := linker.Remove(source, destination); err != nil {
+		t.Fatalf("missing destination is not idempotent: %v", err)
+	}
+	if err := os.WriteFile(destination, []byte("different"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := linker.Remove(source, destination); !errors.Is(err, ErrConflict) {
+		t.Fatalf("different destination removed: %v", err)
+	}
+	if _, err := os.Stat(destination); err != nil {
+		t.Fatal("conflicting destination was removed:", err)
+	}
+}

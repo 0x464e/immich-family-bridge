@@ -89,6 +89,13 @@ func (c *Client) Me(ctx context.Context, m domain.Member) (string, error) {
 	e := c.request(ctx, m.Key, "GET", "/users/me", nil, &v)
 	return v.ID, e
 }
+func (c *Client) Permissions(ctx context.Context, m domain.Member) ([]string, error) {
+	var v struct {
+		Permissions []string `json:"permissions"`
+	}
+	err := c.request(ctx, m.Key, "GET", "/api-keys/me", nil, &v)
+	return v.Permissions, err
+}
 func (c *Client) GetLibrary(ctx context.Context, m domain.Member) (domain.Library, error) {
 	var library domain.Library
 	if c.AdminKey == "" {
@@ -101,6 +108,15 @@ func (c *Client) GetAsset(ctx context.Context, m domain.Member, id string) (doma
 	var a assetDTO
 	e := c.request(ctx, m.Key, "GET", "/assets/"+url.PathEscape(id), nil, &a)
 	if e != nil {
+		// Immich 3.2 returns HTTP 400, rather than 404, for a missing or
+		// inaccessible asset. Confirm absence with the documented metadata
+		// search so a changed permission is not mistaken for deletion.
+		if strings.Contains(e.Error(), "HTTP 400") {
+			found, searchErr := c.search(ctx, m, map[string]any{"id": id, "size": 1, "withDeleted": true})
+			if searchErr == nil && len(found) == 0 {
+				return domain.Asset{}, fmt.Errorf("%w: GET /assets/%s", immich.ErrNotFound, id)
+			}
+		}
 		return domain.Asset{}, e
 	}
 	out := a.domain()
@@ -258,6 +274,9 @@ func (c *Client) AddAssets(ctx context.Context, m domain.Member, id string, asse
 }
 func (c *Client) RemoveAssets(ctx context.Context, m domain.Member, id string, assets []string) error {
 	return c.changeAssets(ctx, m, id, assets, "DELETE")
+}
+func (c *Client) DeleteAssets(ctx context.Context, m domain.Member, assets []string) error {
+	return c.request(ctx, m.Key, "DELETE", "/assets", map[string]any{"ids": assets, "force": true}, nil)
 }
 func (c *Client) changeAssets(ctx context.Context, m domain.Member, id string, assets []string, method string) error {
 	var result []struct {

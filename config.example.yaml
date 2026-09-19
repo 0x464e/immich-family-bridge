@@ -71,6 +71,18 @@ api_token_env: FAMILYBRIDGE_API_TOKEN
 # Must be at least 1s. The default is 30s when omitted.
 poll_interval: 30s
 
+# Delete recipient replicas after their final registered album reference is
+# removed. The default is false when omitted: the bridge removes album
+# membership but retains the recipient Immich asset and hardlinks in the
+# pending_removal state. When true, cleanup waits one complete polling interval,
+# rechecks that no sharing reference exists, verifies the exact recipient owner,
+# library, and path, then force-deletes only that recipient asset through Immich.
+# On the following poll it removes any media and XMP hardlinks Immich left behind,
+# but only if each still has the same inode as its source. Originals are retained.
+# Enable this only after validating deletion with disposable media. Member API
+# keys then also require asset.delete permission.
+remove_unshared_replicas: false
+
 # Family members to synchronize; configure at least two. Give each person a
 # distinct bridge ID, Immich user ID, recipient library ID, and API key. Keep
 # this membership and the IDs stable after initialization; changing them needs
@@ -86,9 +98,9 @@ members:
     # Environment variable holding this user's Immich API key. The bridge checks
     # that the key belongs to user_id. Give it user.read, asset.read,
     # assetFile.read, album.create, album.read, album.update,
-    # albumAsset.create, albumAsset.delete, and job.create permissions. The last
-    # scope refreshes metadata after a linked XMP changes. Never put the key
-    # itself in this file.
+    # albumAsset.create, albumAsset.delete, and job.create permissions. Add
+    # asset.delete when remove_unshared_replicas is true. job.create refreshes
+    # metadata after a linked XMP changes. Never put the key itself in this file.
     key_env: IMMICH_MEMBER_ALICE_KEY
   # Another member; use a different stable ID, user, library, and key variable.
   - id: bob

@@ -32,6 +32,21 @@ type cancelingClient struct {
 	cancel context.CancelFunc
 }
 
+type restrictedClient struct{ immich.Client }
+
+func (restrictedClient) Permissions(context.Context, domain.Member) ([]string, error) {
+	return []string{"asset.read"}, nil
+}
+
+func TestCleanupRequiresAssetDeletePermission(t *testing.T) {
+	c, db, api, _ := setup(t)
+	c.RemoveUnshared = true
+	r := New(c, db, restrictedClient{Client: api}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := r.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "asset.delete") {
+		t.Fatalf("cleanup accepted restricted member key: %v", err)
+	}
+}
+
 func (c cancelingClient) GetAsset(ctx context.Context, member domain.Member, id string) (domain.Asset, error) {
 	c.cancel()
 	return domain.Asset{}, ctx.Err()
@@ -644,6 +659,175 @@ func TestRegisterExistingAlbumsTakesUnion(t *testing.T) {
 	var count int
 	if e := db.DB.QueryRow(`SELECT COUNT(*) FROM logical_assets`).Scan(&count); e != nil || count != 2 {
 		t.Fatalf("feedback loop: %d %v", count, e)
+	}
+}
+
+func TestRemoveLastSharingReferenceDeletesOnlyRecipientReplicas(t *testing.T) {
+	c, db, api, r := setup(t)
+	c.RemoveUnshared = true
+	r = New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	sidecar := filepath.Join(c.SourceRoot, "a.jpg.xmp")
+	if err := os.WriteFile(sidecar, []byte("xmp"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.SetSidecar("a1", sidecar); err != nil {
+		t.Fatal(err)
+	}
+	album, err := r.Register(ctx, "alice", "trip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lid, ok, err := db.FindReplicaAsset("alice", "a1")
+	if err != nil || !ok {
+		t.Fatal("origin mapping:", err)
+	}
+	replicas, err := db.ReplicasFor(lid)
+	if err != nil || len(replicas) != 3 {
+		t.Fatalf("initial replicas: %+v, %v", replicas, err)
+	}
+	recipientPaths := []string{}
+	for _, replica := range replicas {
+		if replica.Role != "external_replica" {
+			continue
+		}
+		files, err := db.ReplicaFiles(lid, replica.MemberID)
+		if err != nil || len(files) != 2 {
+			t.Fatalf("recipient components for %s: %+v, %v", replica.MemberID, files, err)
+		}
+		for _, component := range files {
+			recipientPaths = append(recipientPaths, component.RecipientPath)
+			if _, err := os.Stat(component.RecipientPath); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := api.RemoveAssets(ctx, c.Members[0], "trip", []string{"a1"}); err != nil {
+		t.Fatal(err)
+	}
+	dryConfig := c
+	dryConfig.DryRun = true
+	preview, err := New(dryConfig, db, api, slog.New(slog.NewTextHandler(io.Discard, nil))).DryRun(ctx)
+	if err != nil {
+		t.Fatal("cleanup dry run:", err)
+	}
+	deleteActions := 0
+	for _, action := range preview {
+		if action.Kind == "delete_recipient_replica" && action.LogicalAssetID == lid {
+			deleteActions++
+		}
+	}
+	if deleteActions != 2 {
+		t.Fatalf("cleanup dry run reported %d recipient deletions: %+v", deleteActions, preview)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal("mark unused:", err)
+	}
+	for _, member := range []string{"bob", "carol"} {
+		replica, found, err := db.Replica(lid, member)
+		if err != nil || !found || replica.State != "pending_removal" {
+			t.Fatalf("%s was not given a grace cycle: %+v, %v", member, replica, err)
+		}
+	}
+	for _, path := range recipientPaths {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal("grace cycle removed file:", err)
+		}
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal("request deletion:", err)
+	}
+	for _, member := range []string{"bob", "carol"} {
+		replica, found, err := db.Replica(lid, member)
+		if err != nil || !found || replica.State != "deleting" {
+			t.Fatalf("%s deletion state was not persisted: %+v, %v", member, replica, err)
+		}
+	}
+	// A new reconciler models a process crash after Immich accepted deletion but
+	// before local files and mappings were finalized.
+	r = New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := r.Run(ctx); err != nil {
+		t.Fatal("restart cleanup:", err)
+	}
+	for _, member := range []string{"bob", "carol"} {
+		if replica, found, err := db.Replica(lid, member); err != nil || found {
+			t.Fatalf("%s recipient mapping remains: %+v, %v", member, replica, err)
+		}
+	}
+	for _, path := range recipientPaths {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("recipient file remains at %s: %v", path, err)
+		}
+	}
+	for _, path := range []string{filepath.Join(c.SourceRoot, "a.jpg"), sidecar} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("source was removed at %s: %v", path, err)
+		}
+	}
+	origin, found, err := db.Replica(lid, "alice")
+	if err != nil || !found || origin.AssetID != "a1" || origin.State != "ready" {
+		t.Fatalf("origin mapping changed: %+v, %v", origin, err)
+	}
+	albumReplicas, _ := db.AlbumReplicas(album)
+	for _, member := range c.Members {
+		assets, err := api.ListAlbumAssets(ctx, member, albumReplicas[member.ID])
+		if err != nil || len(assets) != 0 {
+			t.Fatalf("%s album still contains assets: %+v, %v", member.ID, assets, err)
+		}
+	}
+}
+
+func TestRemovalWaitsForAnInFlightImportBeforeDeleting(t *testing.T) {
+	c, db, api, _ := setup(t)
+	c.RemoveUnshared = true
+	r := New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r.scanInterval = 0
+	ctx := context.Background()
+	api.BlockScans(true)
+	if _, err := r.Register(ctx, "alice", "trip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lid, ok, err := db.FindReplicaAsset("alice", "a1")
+	if err != nil || !ok {
+		t.Fatal("origin mapping:", err)
+	}
+	bob, found, err := db.Replica(lid, "bob")
+	if err != nil || !found || bob.State != "pending_import" || bob.AssetID != "" {
+		t.Fatalf("initial pending import: %+v, %v", bob, err)
+	}
+	if err := api.RemoveAssets(ctx, c.Members[0], "trip", []string{"a1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bob, found, err = db.Replica(lid, "bob")
+	if err != nil || !found || bob.State != "pending_removal" {
+		t.Fatalf("in-flight import was not retained: %+v, %v", bob, err)
+	}
+	if _, err := os.Stat(bob.Path); err != nil {
+		t.Fatal("pending hardlink was removed:", err)
+	}
+	api.BlockScans(false)
+	for i := 0; i < 3; i++ {
+		if err := r.Run(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if bob, found, err := db.Replica(lid, "bob"); err != nil || found {
+		t.Fatalf("recipient remains after import and delete: %+v, %v", bob, err)
+	}
+	if _, err := os.Stat(filepath.Join(c.SourceRoot, "a.jpg")); err != nil {
+		t.Fatal("source was removed:", err)
 	}
 }
 
