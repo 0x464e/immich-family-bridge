@@ -45,7 +45,7 @@ func TestPersistenceAndMigrations(t *testing.T) {
 		t.Fatalf("mapping lost on restart: %+v %v", rep, e)
 	}
 	var version int
-	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 3 {
+	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 4 {
 		t.Fatalf("migration version %d %v", version, e)
 	}
 	if _, e := s.DB.Exec(`INSERT INTO asset_replica_files(logical_asset_id,member_id,component_kind,source_path,recipient_path,state) VALUES(?,?,?,?,?,?)`, id, "b", "original", "/fixture/a.jpg", "/fixture/bridge/b.jpg", "ready"); e != nil {

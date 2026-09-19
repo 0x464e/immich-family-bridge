@@ -21,5 +21,7 @@ type Client interface {
 	AddAssets(context.Context, domain.Member, string, []string) error
 	RemoveAssets(context.Context, domain.Member, string, []string) error
 	ScanLibrary(context.Context, domain.Member) error
+	DiscoverSidecars(context.Context) error
+	RefreshMetadata(context.Context, domain.Member, []string) error
 	FindByPath(context.Context, domain.Member, string) ([]domain.Asset, error)
 }

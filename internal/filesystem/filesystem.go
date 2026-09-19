@@ -53,6 +53,16 @@ func (l Linker) Destination(family, member, originMember, originAsset, source st
 	return filepath.Join(l.BridgeRoot, "families", family, "users", member, "assets", originMember, originAsset+ext), nil
 }
 
+func (l Linker) SidecarDestination(mediaDestination, sourceSidecar string) (string, error) {
+	if !within(l.BridgeRoot, mediaDestination) {
+		return "", errors.New("media destination outside configured root")
+	}
+	if !strings.EqualFold(filepath.Ext(sourceSidecar), ".xmp") {
+		return "", errors.New("unsupported sidecar extension")
+	}
+	return mediaDestination + ".xmp", nil
+}
+
 func (l Linker) Ensure(source, dest string) error {
 	if l.ReadOnly {
 		return ErrReadOnly

@@ -14,7 +14,7 @@ Observed API behavior:
 
 End-to-end reconciliation checked the initial union of three owned photos into each member's “Together” album, a second album referencing one photo, removal and re-addition from different members, a newly uploaded fourth photo, retained recipient files and `pending_removal` after the last sharing reference was removed, and restoration when re-added. A brief Immich outage made `/readyz` return 503; it returned 200 after Immich recovered. Restarting the bridge preserved four logical assets, two logical albums, twelve ready asset mappings, eight recipient files with matching source inodes, and an empty dry run.
 
-This validation covers the tested instance and the ordinary JPEG path. Live Photos, motion photos, sidecars, stacks, edits, videos, public links, and destructive cleanup were not exercised. Validate those separately before extending support.
+This initial validation covered the tested instance and the ordinary JPEG path. Live Photos, motion photos, stacks, edits, videos, public links, and destructive cleanup were not exercised. Validate those separately before extending support.
 
 ## Larger delayed-import run (2026-09-18)
 
@@ -27,3 +27,9 @@ Restarting the test bridge during an audit exposed shutdown warnings from an in-
 ## Abrupt-stop recovery (2026-09-18)
 
 We added another 600 distinct synthetic PNGs to the disposable source library and then to one member's Together album. While the bridge was creating recipient links, we sent the container `SIGKILL`, bypassing graceful shutdown. SQLite immediately held 269 `pending_import` replicas and one `pending_link` replica; `PRAGMA quick_check` returned `ok`. We restarted the same container with its existing state volume. It completed the remaining links, scans, imports, and album additions without warning or error logs. All three Together albums ended with 1,804 assets. The database held 5,412 distinct ready asset mappings, and all 3,608 recipient files existed and matched their sources by inode. The database still passed its integrity check. The test confirms process-kill recovery on this storage setup; it cannot simulate every effect of a physical power loss or damaged storage.
+
+## XMP sidecars (2026-09-19)
+
+We created disposable image and `.xmp` pairs in an External Library and hardlinked both into a recipient library. When both files existed before the recipient scan, Immich associated the sidecar during import and applied its rating. Device and inode checks confirmed that the source and recipient XMP were the same underlying file.
+
+We then imported another image without an XMP, created and linked its sidecar afterward, and confirmed that an ordinary External Library scan did not associate the new file. Immich 3.2.2's administrator sidecar discovery job associated the exact XMP path for both the source and recipient and applied its rating. The bridge now records media and sidecar components separately, requests that discovery job only when an imported recipient lacks the expected association, polls `/asset-files` for the exact path, and issues a targeted metadata refresh when the already-associated XMP later changes. Fake-backend tests cover retry and idempotence. Only Immich-associated XMP sidecars are supported; other sidecar formats and coupled media remain outside this validation.

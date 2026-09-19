@@ -84,7 +84,16 @@ func (s *Server) Handler() http.Handler {
 			write(w, 500, map[string]string{"error": e.Error()})
 			return
 		}
-		write(w, 200, map[string]any{"asset": asset, "replicas": replicas})
+		components := map[string]any{}
+		for _, replica := range replicas {
+			files, err := s.DB.ReplicaFiles(id, replica.MemberID)
+			if err != nil {
+				write(w, 500, map[string]string{"error": err.Error()})
+				return
+			}
+			components[replica.MemberID] = files
+		}
+		write(w, 200, map[string]any{"asset": asset, "replicas": replicas, "components": components})
 	})
 	api.HandleFunc("GET /api/filesystem", func(w http.ResponseWriter, r *http.Request) {
 		reps, e := s.DB.Replicas()

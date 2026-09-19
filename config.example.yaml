@@ -14,8 +14,9 @@ together_album_name: Together
 immich_url: http://immich-server:2283/api
 
 # Name of an environment variable containing an Immich administrator API key.
-# The bridge uses it to inspect recipient libraries and request library scans.
-# Give that key library.read and library.update permissions. Set the secret in
+# The bridge uses it to inspect recipient libraries, request library scans, and
+# start sidecar discovery when an XMP is added after media import. Give that key
+# library.read, library.update, and job.create permissions. Set the secret in
 # the container environment; never put the key in this file.
 admin_key_env: IMMICH_LIBRARY_ADMIN_KEY
 
@@ -85,7 +86,8 @@ members:
     # Environment variable holding this user's Immich API key. The bridge checks
     # that the key belongs to user_id. Give it user.read, asset.read,
     # assetFile.read, album.create, album.read, album.update,
-    # albumAsset.create, and albumAsset.delete permissions. Never put the key
+    # albumAsset.create, albumAsset.delete, and job.create permissions. The last
+    # scope refreshes metadata after a linked XMP changes. Never put the key
     # itself in this file.
     key_env: IMMICH_MEMBER_ALICE_KEY
   # Another member; use a different stable ID, user, library, and key variable.

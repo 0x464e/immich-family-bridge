@@ -30,7 +30,7 @@ type Seed struct {
 	Albums []SeedAlbum
 }
 type SeedAsset struct {
-	ID, Member, Path, Type string
+	ID, Member, Path, Type, SidecarPath string
 }
 type SeedAlbum struct {
 	ID, Member, Name, Description string
@@ -77,7 +77,7 @@ func New(c config.Config, statePath string, data Seed) (*Client, error) {
 		if typ == "" {
 			typ = "IMAGE"
 		}
-		f.state.Assets[a.ID] = domain.Asset{ID: a.ID, OwnerID: m.UserID, OriginalPath: a.Path, OriginalFileName: filepath.Base(a.Path), Type: typ}
+		f.state.Assets[a.ID] = domain.Asset{ID: a.ID, OwnerID: m.UserID, OriginalPath: a.Path, OriginalFileName: filepath.Base(a.Path), Type: typ, Sidecar: a.SidecarPath != "", SidecarPath: a.SidecarPath}
 	}
 	for _, a := range data.Albums {
 		m, _ := f.member(a.Member)
@@ -112,6 +112,18 @@ func (f *Client) MoveAssetPath(id, path string) error {
 		return immich.ErrNotFound
 	}
 	asset.OriginalPath = path
+	f.state.Assets[id] = asset
+	return f.save()
+}
+func (f *Client) SetSidecar(id, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	asset, ok := f.state.Assets[id]
+	if !ok {
+		return immich.ErrNotFound
+	}
+	asset.Sidecar = path != ""
+	asset.SidecarPath = path
 	f.state.Assets[id] = asset
 	return f.save()
 }
@@ -298,6 +310,9 @@ func (f *Client) ScanLibrary(_ context.Context, m domain.Member) error {
 		if !d.Type().IsRegular() {
 			return nil
 		}
+		if strings.EqualFold(filepath.Ext(path), ".xmp") {
+			return nil
+		}
 		rel, e := filepath.Rel(f.config.BridgeRoot, path)
 		if e != nil {
 			return nil
@@ -314,10 +329,61 @@ func (f *Client) ScanLibrary(_ context.Context, m domain.Member) error {
 		if strings.EqualFold(filepath.Ext(path), ".mp4") {
 			typ = "VIDEO"
 		}
-		f.state.Assets[id] = domain.Asset{ID: id, OwnerID: m.UserID, LibraryID: m.LibraryID, OriginalPath: immichPath, OriginalFileName: filepath.Base(path), Type: typ}
+		asset := domain.Asset{ID: id, OwnerID: m.UserID, LibraryID: m.LibraryID, OriginalPath: immichPath, OriginalFileName: filepath.Base(path), Type: typ}
+		for _, candidate := range []string{path + ".xmp", strings.TrimSuffix(path, filepath.Ext(path)) + ".xmp"} {
+			if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
+				relSidecar, err := filepath.Rel(f.config.BridgeRoot, candidate)
+				if err == nil {
+					asset.Sidecar = true
+					asset.SidecarPath = filepath.Join(f.config.ImmichBridgeRoot, relSidecar)
+				}
+				break
+			}
+		}
+		f.state.Assets[id] = asset
 		return nil
 	})
 	return f.save()
+}
+func (f *Client) DiscoverSidecars(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return err
+	}
+	for id, asset := range f.state.Assets {
+		if asset.SidecarPath != "" {
+			continue
+		}
+		for _, candidate := range []string{asset.OriginalPath + ".xmp", strings.TrimSuffix(asset.OriginalPath, filepath.Ext(asset.OriginalPath)) + ".xmp"} {
+			var local string
+			if strings.HasPrefix(candidate, f.config.ImmichBridgeRoot+string(filepath.Separator)) {
+				rel, err := filepath.Rel(f.config.ImmichBridgeRoot, candidate)
+				if err != nil {
+					continue
+				}
+				local = filepath.Join(f.config.BridgeRoot, rel)
+			} else {
+				mapped, err := f.config.SourcePath(candidate)
+				if err != nil {
+					continue
+				}
+				local = mapped
+			}
+			if info, err := os.Lstat(local); err == nil && info.Mode().IsRegular() {
+				asset.Sidecar = true
+				asset.SidecarPath = candidate
+				f.state.Assets[id] = asset
+				break
+			}
+		}
+	}
+	return f.save()
+}
+func (f *Client) RefreshMetadata(_ context.Context, _ domain.Member, _ []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fail()
 }
 func (f *Client) FindByPath(_ context.Context, m domain.Member, path string) ([]domain.Asset, error) {
 	f.mu.Lock()
