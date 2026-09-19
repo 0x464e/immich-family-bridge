@@ -34,7 +34,7 @@ func TestPinnedOpenAPISubset(t *testing.T) {
 	if spec.Info.Version != "3.2.2" {
 		t.Fatalf("spec version %s", spec.Info.Version)
 	}
-	for path, method := range map[string]string{"/users/me": "get", "/assets/{id}": "get", "/asset-files": "get", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/shared-links": "post"} {
+	for path, method := range map[string]string{"/users/me": "get", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post"} {
 		if spec.Paths[path][method] == nil {
 			t.Fatalf("missing %s %s", method, path)
 		}
@@ -146,6 +146,61 @@ func TestGetAssetRejectsEditedComponent(t *testing.T) {
 	}
 }
 
+func TestGetAssetIncludesSupportedSidecarPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/assets/asset":
+			_, _ = w.Write([]byte(`{"id":"asset","ownerId":"user","originalPath":"/data/a.jpg","type":"IMAGE"}`))
+		case "/api/asset-files":
+			_, _ = w.Write([]byte(`[{"type":"sidecar","path":"/data/a.jpg.xmp","isEdited":false}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	a, err := c.GetAsset(context.Background(), domain.Member{Key: "secret"}, "asset")
+	if err != nil || !a.Supported() || !a.Sidecar || a.SidecarPath != "/data/a.jpg.xmp" {
+		t.Fatalf("sidecar asset: %+v %v", a, err)
+	}
+}
+
+func TestSidecarJobsUseDocumentedRequests(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		switch r.URL.Path {
+		case "/api/jobs/sidecar":
+			if r.Method != http.MethodPut || r.Header.Get("x-api-key") != "admin" || body["command"] != "start" || body["force"] != false {
+				t.Errorf("sidecar discovery request: %s %#v", r.Method, body)
+			}
+		case "/api/assets/jobs":
+			ids, _ := body["assetIds"].([]any)
+			if r.Method != http.MethodPost || r.Header.Get("x-api-key") != "member" || body["name"] != "refresh-metadata" || len(ids) != 1 || ids[0] != "asset" {
+				t.Errorf("metadata refresh request: %s %#v", r.Method, body)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	c.AdminKey = "admin"
+	if err := c.DiscoverSidecars(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RefreshMetadata(context.Background(), domain.Member{Key: "member"}, []string{"asset"}); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
 func TestReadOnlyClientAllowsSearchButBlocksWrites(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +227,8 @@ func TestReadOnlyClientAllowsSearchButBlocksWrites(t *testing.T) {
 		func() error { return c.AddAssets(context.Background(), m, "album", []string{"asset"}) },
 		func() error { return c.RemoveAssets(context.Background(), m, "album", []string{"asset"}) },
 		func() error { return c.ScanLibrary(context.Background(), m) },
+		func() error { return c.DiscoverSidecars(context.Background()) },
+		func() error { return c.RefreshMetadata(context.Background(), m, []string{"asset"}) },
 	} {
 		if err := call(); err == nil {
 			t.Fatal("read-only client accepted a write")

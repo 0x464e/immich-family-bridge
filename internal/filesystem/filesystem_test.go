@@ -27,6 +27,9 @@ func TestHardlinkIdentityAndUnlink(t *testing.T) {
 	if filepath.Ext(dest) != ".jpg" {
 		t.Fatal(dest)
 	}
+	if sidecar, err := l.SidecarDestination(dest, source+".xmp"); err != nil || sidecar != dest+".xmp" {
+		t.Fatalf("sidecar destination %q: %v", sidecar, err)
+	}
 	for i := 0; i < 2; i++ {
 		if e := l.Ensure(source, dest); e != nil {
 			t.Fatal(e)

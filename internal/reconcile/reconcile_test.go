@@ -22,8 +22,9 @@ import (
 
 type measuringClient struct {
 	immich.Client
-	scans    map[string]int
-	addSizes []int
+	scans             map[string]int
+	metadataRefreshes map[string]int
+	addSizes          []int
 }
 
 type cancelingClient struct {
@@ -68,6 +69,11 @@ func (m *measuringClient) ScanLibrary(ctx context.Context, member domain.Member)
 func (m *measuringClient) AddAssets(ctx context.Context, member domain.Member, albumID string, ids []string) error {
 	m.addSizes = append(m.addSizes, len(ids))
 	return m.Client.AddAssets(ctx, member, albumID, ids)
+}
+
+func (m *measuringClient) RefreshMetadata(ctx context.Context, member domain.Member, ids []string) error {
+	m.metadataRefreshes[member.ID] += len(ids)
+	return m.Client.RefreshMetadata(ctx, member, ids)
 }
 
 func TestLargeDelayedImportUsesBoundedWorkAndCoalescedScans(t *testing.T) {
@@ -244,6 +250,76 @@ func setup(t *testing.T) (config.Config, *store.Store, *fake.Client, *Reconciler
 	}
 	r := New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return c, db, api, r
+}
+
+func TestLateSidecarIsLinkedDiscoveredAndRefreshed(t *testing.T) {
+	c, db, api, r := setup(t)
+	ctx := context.Background()
+	if _, err := r.Register(ctx, "alice", "trip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lid, found, err := db.FindReplicaAsset("alice", "a1")
+	if err != nil || !found {
+		t.Fatalf("origin mapping: %q %v", lid, err)
+	}
+	sidecar := filepath.Join(c.SourceRoot, "a.jpg.xmp")
+	if err := os.WriteFile(sidecar, []byte("<xmp>metadata</xmp>"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.SetSidecar("a1", sidecar); err != nil {
+		t.Fatal(err)
+	}
+	measured := &measuringClient{Client: api, scans: map[string]int{}, metadataRefreshes: map[string]int{}}
+	r = New(c, db, measured, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r.scanInterval = 0
+	if err := r.Run(ctx); err != nil {
+		t.Fatal("link and discovery cycle:", err)
+	}
+	for _, memberID := range []string{"bob", "carol"} {
+		replica, ok, err := db.Replica(lid, memberID)
+		if err != nil || !ok {
+			t.Fatalf("recipient %s: %+v %v", memberID, replica, err)
+		}
+		files, err := db.ReplicaFiles(lid, memberID)
+		if err != nil || files["sidecar"].State != "pending_discovery" {
+			t.Fatalf("sidecar should await Immich discovery for %s: %+v %v", memberID, files, err)
+		}
+		sourceInfo, _ := os.Stat(sidecar)
+		recipientInfo, statErr := os.Stat(replica.Path + ".xmp")
+		if statErr != nil || !os.SameFile(sourceInfo, recipientInfo) {
+			t.Fatalf("sidecar for %s is not a hardlink: %v", memberID, statErr)
+		}
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal("association and metadata refresh cycle:", err)
+	}
+	for _, memberID := range []string{"bob", "carol"} {
+		files, err := db.ReplicaFiles(lid, memberID)
+		if err != nil || files["sidecar"].State != "ready" {
+			t.Fatalf("sidecar did not become ready for %s: %+v %v", memberID, files, err)
+		}
+		if measured.metadataRefreshes[memberID] != 0 {
+			t.Fatalf("metadata refreshes for %s = %d", memberID, measured.metadataRefreshes[memberID])
+		}
+	}
+	if err := os.WriteFile(sidecar, []byte("<xmp>updated metadata with a different size</xmp>"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal("sidecar update cycle:", err)
+	}
+	if measured.metadataRefreshes["bob"] != 1 || measured.metadataRefreshes["carol"] != 1 {
+		t.Fatalf("updated sidecars were not refreshed once: %+v", measured.metadataRefreshes)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal("idempotent cycle:", err)
+	}
+	if measured.metadataRefreshes["bob"] != 1 || measured.metadataRefreshes["carol"] != 1 {
+		t.Fatalf("unchanged sidecars refreshed again: %+v", measured.metadataRefreshes)
+	}
 }
 
 func TestTogetherIsProvisionedAfterDryRunWithoutDuplicates(t *testing.T) {

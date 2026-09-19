@@ -21,16 +21,56 @@ type Asset struct {
 	Stacked          bool   `json:"stacked"`
 	Edited           bool   `json:"edited"`
 	Sidecar          bool   `json:"sidecar"`
+	SidecarPath      string `json:"sidecarPath,omitempty"`
 }
 
 func (a Asset) Supported() bool {
+	return a.UnsupportedReason() == ""
+}
+
+func (a Asset) UnsupportedReason() string {
 	if a.Type != "IMAGE" && a.Type != "VIDEO" {
+		return "unsupported_type"
+	}
+	if a.LivePhotoVideoID != "" {
+		return "live_photo"
+	}
+	if a.Stacked {
+		return "stack"
+	}
+	if a.Edited {
+		return "edit"
+	}
+	if filepath.Ext(a.OriginalPath) == "" {
+		return "missing_extension"
+	}
+	if a.Sidecar && a.SidecarPath == "" {
+		return "sidecar_path_missing"
+	}
+	if a.SidecarPath != "" && !equalFoldExt(a.SidecarPath, ".xmp") {
+		return "unsupported_sidecar"
+	}
+	return ""
+}
+
+func equalFoldExt(path, ext string) bool {
+	got := filepath.Ext(path)
+	if len(got) != len(ext) {
 		return false
 	}
-	if a.LivePhotoVideoID != "" || a.Stacked || a.Edited || a.Sidecar {
-		return false
+	for i := range got {
+		a, b := got[i], ext[i]
+		if a >= 'A' && a <= 'Z' {
+			a += 'a' - 'A'
+		}
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if a != b {
+			return false
+		}
 	}
-	return filepath.Ext(a.OriginalPath) != ""
+	return true
 }
 
 type Album struct {
@@ -64,12 +104,13 @@ type Replica struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// MediaComponent leaves room for paired videos and sidecars. The first
-// milestone only reconciles a single original component per asset.
 type MediaComponent struct {
 	Kind          string `json:"kind"`
 	SourcePath    string `json:"sourcePath"`
 	RecipientPath string `json:"recipientPath"`
+	State         string `json:"state"`
+	SourceSize    int64  `json:"sourceSize"`
+	SourceMtimeNS int64  `json:"sourceMtimeNs"`
 }
 
 type LogicalAlbum struct {

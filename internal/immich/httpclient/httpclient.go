@@ -107,6 +107,7 @@ func (c *Client) GetAsset(ctx context.Context, m domain.Member, id string) (doma
 	var files []struct {
 		Type     string `json:"type"`
 		IsEdited bool   `json:"isEdited"`
+		Path     string `json:"path"`
 	}
 	e = c.request(ctx, m.Key, "GET", "/asset-files?assetId="+url.QueryEscape(id), nil, &files)
 	if e != nil {
@@ -115,6 +116,7 @@ func (c *Client) GetAsset(ctx context.Context, m domain.Member, id string) (doma
 	for _, file := range files {
 		if file.Type == "sidecar" {
 			out.Sidecar = true
+			out.SidecarPath = file.Path
 		}
 		if file.IsEdited {
 			out.Edited = true
@@ -282,6 +284,18 @@ func (c *Client) ScanLibrary(ctx context.Context, m domain.Member) error {
 		return errors.New("admin API key required to scan an external library")
 	}
 	return c.request(ctx, key, "POST", "/libraries/"+url.PathEscape(m.LibraryID)+"/scan", nil, nil)
+}
+func (c *Client) DiscoverSidecars(ctx context.Context) error {
+	if c.AdminKey == "" {
+		return errors.New("admin API key required to discover sidecars")
+	}
+	return c.request(ctx, c.AdminKey, http.MethodPut, "/jobs/sidecar", map[string]any{"command": "start", "force": false}, nil)
+}
+func (c *Client) RefreshMetadata(ctx context.Context, m domain.Member, assetIDs []string) error {
+	if len(assetIDs) == 0 {
+		return nil
+	}
+	return c.request(ctx, m.Key, http.MethodPost, "/assets/jobs", map[string]any{"name": "refresh-metadata", "assetIds": assetIDs}, nil)
 }
 func (c *Client) FindByPath(ctx context.Context, m domain.Member, path string) ([]domain.Asset, error) {
 	found, e := c.search(ctx, m, map[string]any{"libraryId": m.LibraryID, "originalPath": path, "size": 100})

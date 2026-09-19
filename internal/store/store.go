@@ -48,7 +48,7 @@ func (s *Store) Migrate() error {
 	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
-	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql"}
+	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql"}
 	var max int
 	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&max); err != nil {
 		return err
@@ -319,6 +319,28 @@ func (s *Store) UpsertReplica(r domain.Replica) error {
 	}
 	_, err := s.DB.Exec(`INSERT INTO asset_replicas(logical_asset_id,member_id,immich_asset_id,role,filesystem_path,external_library_id,state,error) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(logical_asset_id,member_id) DO UPDATE SET immich_asset_id=excluded.immich_asset_id,role=excluded.role,filesystem_path=excluded.filesystem_path,external_library_id=excluded.external_library_id,state=excluded.state,error=excluded.error`, r.LogicalID, r.MemberID, aid, r.Role, r.Path, r.LibraryID, r.State, r.Error)
 	return err
+}
+
+func (s *Store) UpsertReplicaFile(logicalID, memberID string, component domain.MediaComponent) error {
+	_, err := s.DB.Exec(`INSERT INTO asset_replica_files(logical_asset_id,member_id,component_kind,source_path,recipient_path,state,source_size,source_mtime_ns) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(logical_asset_id,member_id,component_kind) DO UPDATE SET source_path=excluded.source_path,recipient_path=excluded.recipient_path,state=excluded.state,source_size=excluded.source_size,source_mtime_ns=excluded.source_mtime_ns`, logicalID, memberID, component.Kind, component.SourcePath, component.RecipientPath, component.State, component.SourceSize, component.SourceMtimeNS)
+	return err
+}
+
+func (s *Store) ReplicaFiles(logicalID, memberID string) (map[string]domain.MediaComponent, error) {
+	rows, err := s.DB.Query(`SELECT component_kind,source_path,recipient_path,state,source_size,source_mtime_ns FROM asset_replica_files WHERE logical_asset_id=? AND member_id=?`, logicalID, memberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]domain.MediaComponent{}
+	for rows.Next() {
+		var component domain.MediaComponent
+		if err := rows.Scan(&component.Kind, &component.SourcePath, &component.RecipientPath, &component.State, &component.SourceSize, &component.SourceMtimeNS); err != nil {
+			return nil, err
+		}
+		out[component.Kind] = component
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Replicas() ([]domain.Replica, error) {

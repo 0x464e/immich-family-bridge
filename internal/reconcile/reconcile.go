@@ -20,16 +20,18 @@ import (
 )
 
 type Reconciler struct {
-	C            config.Config
-	DB           *store.Store
-	API          immich.Client
-	FS           filesystem.Linker
-	Log          *slog.Logger
-	mu           sync.Mutex
-	batchCursor  map[string]string
-	lastScanAt   map[string]time.Time
-	scanInterval time.Duration
-	now          func() time.Time
+	C                      config.Config
+	DB                     *store.Store
+	API                    immich.Client
+	FS                     filesystem.Linker
+	Log                    *slog.Logger
+	mu                     sync.Mutex
+	batchCursor            map[string]string
+	lastScanAt             map[string]time.Time
+	scanInterval           time.Duration
+	sidecarDiscoveryNeeded bool
+	lastSidecarDiscoveryAt time.Time
+	now                    func() time.Time
 }
 
 var ErrDryRunMode = errors.New("dry-run mode enabled; proposed actions are reported in the service logs")
@@ -344,6 +346,18 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	if e := r.DB.MarkUnused(); e != nil {
 		errs = append(errs, e)
 	}
+	if r.sidecarDiscoveryNeeded {
+		now := r.now()
+		if r.lastSidecarDiscoveryAt.IsZero() || now.Sub(r.lastSidecarDiscoveryAt) >= r.scanInterval {
+			r.lastSidecarDiscoveryAt = now
+			if e := r.API.DiscoverSidecars(ctx); e != nil {
+				r.Log.Warn("Immich sidecar discovery request failed", "error", e)
+			} else {
+				r.sidecarDiscoveryNeeded = false
+				r.Log.Info("Immich sidecar discovery requested")
+			}
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -542,7 +556,11 @@ func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, 
 		case found && rep.State == "pending_import" && rep.Path != "":
 			pending[id] = true
 		case found && rep.State == "unsupported":
-			unsupported++
+			if rep.Error == "coupled or unsupported media type" {
+				needsPrepare = append(needsPrepare, id)
+			} else {
+				unsupported++
+			}
 		default:
 			needsPrepare = append(needsPrepare, id)
 		}
@@ -715,10 +733,11 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 			_ = r.DB.UpsertReplica(current)
 			return current, e
 		}
-		path, e := r.C.SourcePath(originAsset.OriginalPath)
+		originAsset, e = r.mappedAsset(originAsset)
 		if e != nil || originAsset.OwnerID != m.UserID {
 			return current, errors.New("origin asset path or owner changed")
 		}
+		path := originAsset.OriginalPath
 		if path != current.Path {
 			if e := r.rebindOriginPath(logicalID, m.ID, current.Path, path); e != nil {
 				return current, fmt.Errorf("origin path changed: %w", e)
@@ -731,6 +750,9 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 			if e := r.DB.UpsertReplica(current); e != nil {
 				return current, e
 			}
+		}
+		if e := r.recordOriginComponents(logicalID, m.ID, originAsset); e != nil {
+			return current, e
 		}
 		return current, nil
 	}
@@ -762,7 +784,7 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 			current = domain.Replica{LogicalID: logicalID, MemberID: m.ID, Role: "external_replica", LibraryID: m.LibraryID}
 		}
 		current.State = "unsupported"
-		current.Error = "coupled or unsupported media type"
+		current.Error = asset.UnsupportedReason()
 		_ = r.DB.UpsertReplica(current)
 		return current, errors.New(current.Error)
 	}
@@ -791,11 +813,16 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 			return current, errors.New("stored recipient asset identity mismatch")
 		}
 		if e == nil {
-			if e := r.FS.Ensure(asset.OriginalPath, path); e != nil {
-				current.State = "error"
+			if e := r.ensureRecipientComponents(ctx, logicalID, m, current, asset, path, &remote); e != nil {
 				current.Error = e.Error()
 				_ = r.DB.UpsertReplica(current)
 				return current, e
+			}
+			if current.Error != "" {
+				current.Error = ""
+				if e := r.DB.UpsertReplica(current); e != nil {
+					return current, e
+				}
 			}
 			return current, nil
 		}
@@ -808,7 +835,7 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 	if err := r.DB.UpsertReplica(current); err != nil {
 		return current, err
 	}
-	if err := r.FS.Ensure(asset.OriginalPath, path); err != nil {
+	if err := r.ensureRecipientComponents(ctx, logicalID, m, current, asset, path, nil); err != nil {
 		current.State = "error"
 		current.Error = err.Error()
 		_ = r.DB.UpsertReplica(current)
@@ -1073,7 +1100,103 @@ func (r *Reconciler) mappedAsset(asset domain.Asset) (domain.Asset, error) {
 		return asset, err
 	}
 	asset.OriginalPath = path
+	if asset.SidecarPath != "" {
+		sidecar, err := r.C.SourcePath(asset.SidecarPath)
+		if err != nil {
+			return asset, fmt.Errorf("map sidecar path: %w", err)
+		}
+		asset.SidecarPath = sidecar
+	}
 	return asset, nil
+}
+
+func (r *Reconciler) component(kind, source, recipient, state string) (domain.MediaComponent, error) {
+	info, err := r.FS.SourceInfo(source)
+	if err != nil {
+		return domain.MediaComponent{}, err
+	}
+	return domain.MediaComponent{Kind: kind, SourcePath: source, RecipientPath: recipient, State: state, SourceSize: info.Size(), SourceMtimeNS: info.ModTime().UnixNano()}, nil
+}
+
+func (r *Reconciler) recordOriginComponents(logicalID, memberID string, asset domain.Asset) error {
+	media, err := r.component("original", asset.OriginalPath, asset.OriginalPath, "ready")
+	if err != nil {
+		return err
+	}
+	if err := r.DB.UpsertReplicaFile(logicalID, memberID, media); err != nil {
+		return err
+	}
+	if asset.SidecarPath == "" {
+		return nil
+	}
+	sidecar, err := r.component("sidecar", asset.SidecarPath, asset.SidecarPath, "ready")
+	if err != nil {
+		return err
+	}
+	return r.DB.UpsertReplicaFile(logicalID, memberID, sidecar)
+}
+
+func (r *Reconciler) ensureRecipientComponents(ctx context.Context, logicalID string, member domain.Member, replica domain.Replica, asset domain.Asset, mediaPath string, remote *domain.Asset) error {
+	if err := r.FS.Ensure(asset.OriginalPath, mediaPath); err != nil {
+		return err
+	}
+	media, err := r.component("original", asset.OriginalPath, mediaPath, "ready")
+	if err != nil {
+		return err
+	}
+	if err := r.DB.UpsertReplicaFile(logicalID, member.ID, media); err != nil {
+		return err
+	}
+	if asset.SidecarPath == "" {
+		return nil
+	}
+	sidecarPath, err := r.FS.SidecarDestination(mediaPath, asset.SidecarPath)
+	if err != nil {
+		return err
+	}
+	if err := r.FS.Ensure(asset.SidecarPath, sidecarPath); err != nil {
+		return err
+	}
+	state := "pending_import"
+	component, err := r.component("sidecar", asset.SidecarPath, sidecarPath, state)
+	if err != nil {
+		return err
+	}
+	previous, err := r.DB.ReplicaFiles(logicalID, member.ID)
+	if err != nil {
+		return err
+	}
+	if remote != nil {
+		expectedRemote, err := r.remoteBridgePath(sidecarPath)
+		if err != nil {
+			return err
+		}
+		if remote.SidecarPath != expectedRemote {
+			component.State = "pending_discovery"
+			r.sidecarDiscoveryNeeded = true
+		} else {
+			component.State = "ready"
+			old, found := previous["sidecar"]
+			changed := found && old.State == "ready" && old.SourcePath == component.SourcePath && (old.SourceSize != component.SourceSize || old.SourceMtimeNS != component.SourceMtimeNS)
+			if changed {
+				if replica.AssetID == "" {
+					return errors.New("ready sidecar has no recipient asset ID")
+				}
+				if err := r.API.RefreshMetadata(ctx, member, []string{replica.AssetID}); err != nil {
+					return fmt.Errorf("refresh recipient sidecar metadata: %w", err)
+				}
+			}
+		}
+	}
+	return r.DB.UpsertReplicaFile(logicalID, member.ID, component)
+}
+
+func (r *Reconciler) remoteBridgePath(localPath string) (string, error) {
+	rel, err := filepath.Rel(r.C.BridgeRoot, localPath)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("component path outside bridge root")
+	}
+	return filepath.Join(r.C.ImmichBridgeRoot, rel), nil
 }
 
 func (r *Reconciler) rebindOriginPath(logicalID, memberID, oldPath, newPath string) error {
