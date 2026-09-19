@@ -138,6 +138,59 @@ func TestTogetherAuthorityAndRestart(t *testing.T) {
 	check(trip, true)
 }
 
+func TestMemberAlbumCoverChangePropagatesToEveryReplica(t *testing.T) {
+	c, db, api, r := setup(t)
+	ctx := context.Background()
+	album, err := r.Register(ctx, "alice", "trip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func() {
+		t.Helper()
+		if err := r.Run(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The first cycle establishes a cover baseline for every member album.
+	run()
+	tripReplicas, err := db.AlbumReplicas(album)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.AddAssets(ctx, c.Members[1], tripReplicas["bob"], []string{"b1"}); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	run()
+	coverLogicalID, found, err := db.FindReplicaAsset("bob", "b1")
+	if err != nil || !found {
+		t.Fatalf("bob source cover mapping: %q %v", coverLogicalID, err)
+	}
+	if err := api.UpdateAlbum(ctx, c.Members[1], tripReplicas["bob"], "Trip", "", "b1"); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	albums, err := db.Albums()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, logical := range albums {
+		if logical.ID == album && logical.CoverID != coverLogicalID {
+			t.Fatalf("logical cover = %q, want %q", logical.CoverID, coverLogicalID)
+		}
+	}
+	for _, member := range c.Members {
+		remote, err := api.GetAlbum(ctx, member, tripReplicas[member.ID])
+		if err != nil {
+			t.Fatal(err)
+		}
+		replica, found, err := db.Replica(coverLogicalID, member.ID)
+		if err != nil || !found || remote.CoverID != replica.AssetID {
+			t.Fatalf("%s cover = %q, replica = %+v, error = %v", member.ID, remote.CoverID, replica, err)
+		}
+	}
+}
+
 func TestTogetherBackfillsExistingSecondaryMembership(t *testing.T) {
 	_, db, _, r := setup(t)
 	ctx := context.Background()

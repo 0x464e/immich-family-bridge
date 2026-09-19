@@ -48,7 +48,7 @@ func (s *Store) Migrate() error {
 	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
-	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql"}
+	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql", "migrations/006_album_cover_observations.sql"}
 	var max int
 	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&max); err != nil {
 		return err
@@ -190,6 +190,27 @@ func (s *Store) SetCover(album, logical string) error {
 		value = logical
 	}
 	_, err := s.DB.Exec(`UPDATE logical_albums SET cover_logical_asset_id=? WHERE id=?`, value, album)
+	return err
+}
+
+// AlbumCoverObservation returns the last cover successfully observed or
+// written by the bridge for one member's album replica.
+func (s *Store) AlbumCoverObservation(album, member string) (string, bool, error) {
+	var cover string
+	err := s.DB.QueryRow(`SELECT immich_asset_id FROM album_cover_observations WHERE logical_album_id=? AND member_id=?`, album, member).Scan(&cover)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return cover, err == nil, err
+}
+
+// SetAlbumCoverObservation records a cover only after the matching Immich
+// album update has succeeded. This distinguishes a user edit from a bridge
+// retry after a partial failure.
+func (s *Store) SetAlbumCoverObservation(album, member, cover string) error {
+	_, err := s.DB.Exec(`INSERT INTO album_cover_observations(logical_album_id,member_id,immich_asset_id)
+		VALUES(?,?,?)
+		ON CONFLICT(logical_album_id,member_id) DO UPDATE SET immich_asset_id=excluded.immich_asset_id`, album, member, cover)
 	return err
 }
 

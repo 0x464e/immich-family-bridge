@@ -17,6 +17,7 @@ type albumPlan struct {
 	actions                        []Action
 	origins                        map[string]domain.Asset
 	originMembers                  map[string]string
+	assetLogical                   map[string]string
 }
 
 func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, preview bool) (*albumPlan, error) {
@@ -24,7 +25,7 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 	if err != nil {
 		return nil, err
 	}
-	p := &albumPlan{album: a, before: before, desired: map[string]bool{}, adds: map[string]bool{}, removes: map[string]bool{}, origins: map[string]domain.Asset{}, originMembers: map[string]string{}}
+	p := &albumPlan{album: a, before: before, desired: map[string]bool{}, adds: map[string]bool{}, removes: map[string]bool{}, origins: map[string]domain.Asset{}, originMembers: map[string]string{}, assetLogical: map[string]string{}}
 	for id := range before {
 		p.desired[id] = true
 	}
@@ -35,12 +36,13 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 	for _, m := range r.C.Members {
 		albumID := reps[m.ID]
 		current := map[string]bool{}
-		p.observations = append(p.observations, observed{member: m, albumID: albumID, assets: current})
+		o := observed{member: m, albumID: albumID, assets: current}
 		if albumID == "" {
 			if !preview {
 				return nil, fmt.Errorf("missing album replica for %s", m.ID)
 			}
 			p.actions = append(p.actions, Action{Kind: "create_album_replica", MemberID: m.ID})
+			p.observations = append(p.observations, o)
 			continue
 		}
 		remote, err := r.API.GetAlbum(ctx, m, albumID)
@@ -53,14 +55,10 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 		if remote.Name != a.Name || remote.Description != a.Description {
 			p.actions = append(p.actions, Action{Kind: "update_album_metadata", MemberID: m.ID})
 		}
-		if a.CoverID != "" {
-			cover, found, err := r.DB.Replica(a.CoverID, m.ID)
-			if err != nil {
-				return nil, err
-			}
-			if found && cover.State == "ready" && cover.AssetID != "" && remote.CoverID != cover.AssetID {
-				p.actions = append(p.actions, Action{Kind: "update_album_cover", MemberID: m.ID, LogicalAssetID: a.CoverID, ImmichAssetID: cover.AssetID})
-			}
+		o.coverID = remote.CoverID
+		o.previousCoverID, o.coverWasObserved, err = r.DB.AlbumCoverObservation(a.ID, m.ID)
+		if err != nil {
+			return nil, err
 		}
 		assets, err := r.API.ListAlbumAssets(ctx, m, albumID)
 		if err != nil {
@@ -123,6 +121,7 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 					}
 				}
 			}
+			p.assetLogical[m.ID+"\x00"+asset.ID] = lid
 			if !a.Initialized || !prior[asset.ID] {
 				p.adds[lid] = true
 			}
@@ -153,6 +152,7 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 				}
 			}
 		}
+		p.observations = append(p.observations, o)
 	}
 	for id := range p.adds {
 		p.desired[id] = true
@@ -162,7 +162,52 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 			delete(p.desired, id)
 		}
 	}
+	if err := r.resolveAlbumCover(p); err != nil {
+		return nil, err
+	}
 	return p, nil
+}
+
+// resolveAlbumCover adopts a member's changed cover when it refers to a known
+// logical asset in the mirrored album. Observations are recorded only after a
+// successful bridge write, so a partial propagation retry is not mistaken for
+// another member editing their cover.
+func (r *Reconciler) resolveAlbumCover(p *albumPlan) error {
+	coverLogicalID := ""
+	coverMemberID := ""
+	for _, o := range p.observations {
+		if !o.coverWasObserved || o.coverID == "" || o.coverID == o.previousCoverID {
+			continue
+		}
+		logicalID, known := p.assetLogical[o.member.ID+"\x00"+o.coverID]
+		if !known || !p.desired[logicalID] {
+			continue
+		}
+		if coverLogicalID == "" {
+			coverLogicalID, coverMemberID = logicalID, o.member.ID
+			continue
+		}
+		if coverLogicalID != logicalID {
+			p.actions = append(p.actions, Action{Kind: "album_cover_conflict", MemberID: o.member.ID, LogicalAssetID: logicalID})
+		}
+	}
+	if coverLogicalID != "" && coverLogicalID != p.album.CoverID {
+		p.album.CoverID = coverLogicalID
+		p.actions = append(p.actions, Action{Kind: "adopt_album_cover", MemberID: coverMemberID, LogicalAssetID: coverLogicalID})
+	}
+	if p.album.CoverID == "" {
+		return nil
+	}
+	for _, o := range p.observations {
+		cover, found, err := r.DB.Replica(p.album.CoverID, o.member.ID)
+		if err != nil {
+			return err
+		}
+		if found && cover.State == "ready" && cover.AssetID != "" && o.coverID != cover.AssetID {
+			p.actions = append(p.actions, Action{Kind: "update_album_cover", MemberID: o.member.ID, LogicalAssetID: p.album.CoverID, ImmichAssetID: cover.AssetID})
+		}
+	}
+	return nil
 }
 
 // Together owns the shared set. Secondary album membership is a subset;
@@ -206,6 +251,13 @@ func (r *Reconciler) persistPlans(plans []*albumPlan) error {
 	}
 	defer tx.Rollback()
 	for _, p := range plans {
+		var cover any
+		if p.album.CoverID != "" {
+			cover = p.album.CoverID
+		}
+		if _, err := tx.Exec(`UPDATE logical_albums SET cover_logical_asset_id=? WHERE id=?`, cover, p.album.ID); err != nil {
+			return err
+		}
 		for id := range p.before {
 			if p.desired[id] {
 				continue

@@ -344,9 +344,12 @@ func (r *Reconciler) ensureAlbumReplicas(ctx context.Context, a domain.LogicalAl
 }
 
 type observed struct {
-	member  domain.Member
-	albumID string
-	assets  map[string]bool
+	member           domain.Member
+	albumID          string
+	assets           map[string]bool
+	coverID          string
+	previousCoverID  string
+	coverWasObserved bool
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -609,6 +612,13 @@ func (r *Reconciler) applyAlbum(ctx context.Context, plan *albumPlan) error {
 			}
 		}
 		if err := r.API.UpdateAlbum(ctx, o.member, o.albumID, a.Name, a.Description, coverID); err != nil {
+			return err
+		}
+		observedCover := o.coverID
+		if coverID != "" {
+			observedCover = coverID
+		}
+		if err := r.DB.SetAlbumCoverObservation(a.ID, o.member.ID, observedCover); err != nil {
 			return err
 		}
 		for assetID := range o.assets {
@@ -1006,6 +1016,10 @@ func (a Action) Message() string {
 		return "dry-run: would update member album name or description"
 	case "update_album_cover":
 		return "dry-run: would update member album cover"
+	case "adopt_album_cover":
+		return "dry-run: would use the member album cover for all mirror albums"
+	case "album_cover_conflict":
+		return "dry-run: conflicting member album cover needs review; the first configured member wins"
 	default:
 		return "dry-run: proposed action"
 	}
