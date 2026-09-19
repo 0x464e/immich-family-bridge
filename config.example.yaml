@@ -3,8 +3,11 @@
 # mappings, so keep it unchanged after the bridge has created replicas.
 family_id: my-family
 
-# Canonical name of the automatically managed catch-all album. On the first
-# active startup, the bridge creates it for members without a matching album.
+# Canonical name of the authoritative shared-media album. Every asset in any
+# registered mirror album is also added here. Removing an asset here unshares
+# it from all registered albums; removing it from a secondary album leaves it
+# shared here. On the first active startup, the bridge creates it for members
+# without a matching album.
 # In dry-run mode it previews those creations without writing to Immich.
 # Change this value to rename the managed albums on later active polls.
 together_album_name: Together
@@ -71,9 +74,9 @@ api_token_env: FAMILYBRIDGE_API_TOKEN
 # Must be at least 1s. The default is 30s when omitted.
 poll_interval: 30s
 
-# Delete recipient replicas after their final registered album reference is
-# removed. The default is false when omitted: the bridge removes album
-# membership but retains the recipient Immich asset and hardlinks in the
+# Delete recipient replicas after removal from Together has removed all
+# registered album references. The default is false when omitted: the bridge
+# removes album membership but retains the recipient Immich asset and hardlinks in the
 # pending_removal state. When true, cleanup waits one complete polling interval,
 # rechecks that no sharing reference exists, verifies the exact recipient owner,
 # library, and path, then force-deletes only that recipient asset through Immich.

@@ -35,3 +35,21 @@ We added another 600 distinct synthetic PNGs to the disposable source library an
 We created disposable image and `.xmp` pairs in an External Library and hardlinked both into a recipient library. When both files existed before the recipient scan, Immich associated the sidecar during import and applied its rating. Device and inode checks confirmed that the source and recipient XMP were the same underlying file.
 
 We then imported another image without an XMP, created and linked its sidecar afterward, and confirmed that an ordinary External Library scan did not associate the new file. Immich 3.2.2's administrator sidecar discovery job associated the exact XMP path for both the source and recipient and applied its rating. The bridge now records media and sidecar components separately, requests that discovery job only when an imported recipient lacks the expected association, polls `/asset-files` for the exact path, and issues a targeted metadata refresh when the already-associated XMP later changes. Fake-backend tests cover retry and idempotence. Only Immich-associated XMP sidecars are supported; other sidecar formats and coupled media remain outside this validation.
+
+## Together as the authoritative shared set
+
+The Together membership refactor was exercised on the disposable Immich 3.2.2
+instance with three accounts and its existing 1,805-asset shared library. A test
+asset was present in both Together and Highlights. Removing it from Together
+removed it from both albums for all members and deleted both recipient replicas,
+while retaining the origin. Adding the origin back through Highlights populated
+Together and Highlights for all three accounts. Removing it from a recipient's
+Highlights removed only Highlights membership and preserved Together sharing.
+
+The bridge was force-killed after the global removal decision reached SQLite.
+After restart, removal completed without resurrecting membership from Highlights.
+A subsequent Highlights addition restored sharing, and the fixture was left
+shared in both albums. Unit tests also cover legacy secondary-only membership
+backfill, conflicting edits, a failed album read, a failed remote write, dry-run
+promotion without writes, and delaying secondary album additions until the
+recipient's Together membership has been written.

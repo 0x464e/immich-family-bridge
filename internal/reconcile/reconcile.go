@@ -328,17 +328,27 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var errs []error
+	// Observe every album before changing memberships or deleting replicas. A
+	// failed read must never turn an incomplete view into an unsharing decision.
+	plans := []*albumPlan{}
 	for _, a := range albums {
-		if err := ctx.Err(); err != nil {
+		if err := r.ensureAlbumReplicas(ctx, a); err != nil {
 			return err
 		}
-		if e := r.runAlbum(ctx, a); e != nil {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			r.Log.Error("reconciliation failed", "logical_album_id", a.ID, "error", e)
-			errs = append(errs, fmt.Errorf("album %s: %w", a.ID, e))
+		plan, err := r.observeAlbum(ctx, a, false)
+		if err != nil {
+			return err
+		}
+		plans = append(plans, plan)
+	}
+	resolveTogether(plans)
+	if err := r.persistPlans(plans); err != nil {
+		return err
+	}
+	var errs []error
+	for _, plan := range plans {
+		if err := r.applyAlbum(ctx, plan); err != nil {
+			return fmt.Errorf("album %s: %w", plan.album.ID, err)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -533,113 +543,8 @@ func (r *Reconciler) removeReplicaFiles(ctx context.Context, replica domain.Repl
 	return nil
 }
 
-func (r *Reconciler) runAlbum(ctx context.Context, a domain.LogicalAlbum) error {
-	if err := r.ensureAlbumReplicas(ctx, a); err != nil {
-		return err
-	}
-	reps, err := r.DB.AlbumReplicas(a.ID)
-	if err != nil {
-		return err
-	}
-	obs := []observed{}
-	adds := map[string]bool{}
-	removes := map[string]bool{}
-	for _, m := range r.C.Members {
-		albumID := reps[m.ID]
-		if albumID == "" {
-			return fmt.Errorf("missing album replica for %s", m.ID)
-		}
-		remote, err := r.API.GetAlbum(ctx, m, albumID)
-		if err != nil {
-			return fmt.Errorf("get album for %s: %w", m.ID, err)
-		}
-		if remote.OwnerID != "" && remote.OwnerID != m.UserID {
-			return fmt.Errorf("album owner mismatch for %s", m.ID)
-		}
-		assets, err := r.API.ListAlbumAssets(ctx, m, albumID)
-		if err != nil {
-			return fmt.Errorf("list album for %s: %w", m.ID, err)
-		}
-		prior, err := r.DB.Observations(a.ID, m.ID)
-		if err != nil {
-			return err
-		}
-		current := map[string]bool{}
-		for _, asset := range assets {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			current[asset.ID] = true
-			lid, known, e := r.DB.FindReplicaAsset(m.ID, asset.ID)
-			if e != nil {
-				return e
-			}
-			if !known {
-				if asset.OwnerID != m.UserID || asset.LibraryID == m.LibraryID {
-					return fmt.Errorf("unknown bridge or foreign asset %s in %s album", asset.ID, m.ID)
-				}
-				asset, e = r.mappedAsset(asset)
-				if e != nil {
-					return fmt.Errorf("source path for asset %s: %w", asset.ID, e)
-				}
-				lid, e = r.DB.EnsureOrigin(r.C.FamilyID, m.ID, asset)
-				if e != nil {
-					return e
-				}
-			}
-			if !a.Initialized || !prior[asset.ID] {
-				adds[lid] = true
-			}
-		}
-		if a.Initialized {
-			for old := range prior {
-				if !current[old] {
-					_, checkErr := r.API.GetAsset(ctx, m, old)
-					if errors.Is(checkErr, immich.ErrNotFound) {
-						r.Log.Warn("asset missing from Immich; keeping sharing reference", "member_id", m.ID, "immich_asset_id", old)
-						continue
-					}
-					if checkErr != nil {
-						return fmt.Errorf("check missing album asset: %w", checkErr)
-					}
-					lid, known, e := r.DB.FindReplicaAsset(m.ID, old)
-					if e != nil {
-						return e
-					}
-					if known {
-						removes[lid] = true
-					}
-				}
-			}
-		}
-		obs = append(obs, observed{member: m, albumID: albumID, assets: current})
-	}
-	for id := range adds {
-		if err := r.DB.SetMembership(a.ID, id, true); err != nil {
-			return err
-		}
-	}
-	for id := range removes {
-		if !adds[id] {
-			if err := r.DB.SetMembership(a.ID, id, false); err != nil {
-				return err
-			}
-		}
-	}
-	for _, o := range obs {
-		if err := r.DB.SetObservations(a.ID, o.member.ID, o.assets); err != nil {
-			return err
-		}
-	}
-	if !a.Initialized {
-		if err := r.DB.SetInitialized(a.ID); err != nil {
-			return err
-		}
-	}
-	desired, err := r.DB.Memberships(a.ID)
-	if err != nil {
-		return err
-	}
+func (r *Reconciler) applyAlbum(ctx context.Context, plan *albumPlan) error {
+	a, obs, desired := plan.album, plan.observations, plan.desired
 	if a.CoverID != "" && !desired[a.CoverID] {
 		if err := r.DB.SetCover(a.ID, ""); err != nil {
 			return err
@@ -647,7 +552,23 @@ func (r *Reconciler) runAlbum(ctx context.Context, a domain.LogicalAlbum) error 
 		a.CoverID = ""
 	}
 	for _, o := range obs {
-		if err := r.reconcileMemberAssets(ctx, a.ID, o, desired); err != nil {
+		var togetherAssets map[string]bool
+		if a.SystemKey != "together" {
+			albums, err := r.DB.Albums()
+			if err != nil {
+				return err
+			}
+			for _, album := range albums {
+				if album.SystemKey == "together" {
+					togetherAssets, err = r.DB.Observations(album.ID, o.member.ID)
+					if err != nil {
+						return err
+					}
+					break
+				}
+			}
+		}
+		if err := r.reconcileMemberAssets(ctx, a.ID, o, desired, togetherAssets); err != nil {
 			return err
 		}
 		coverID := ""
@@ -702,7 +623,7 @@ func (r *Reconciler) batchAfter(key string, ids []string, limit int) []string {
 	return out
 }
 
-func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, o observed, desired map[string]bool) error {
+func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, o observed, desired map[string]bool, togetherAssets map[string]bool) error {
 	ids := make([]string, 0, len(desired))
 	for id := range desired {
 		ids = append(ids, id)
@@ -827,7 +748,7 @@ func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, 
 	}
 	toAdd := []string{}
 	for _, id := range ids {
-		if rep, ok := ready[id]; ok && rep.AssetID != "" && !o.assets[rep.AssetID] {
+		if rep, ok := ready[id]; ok && rep.AssetID != "" && !o.assets[rep.AssetID] && (togetherAssets == nil || togetherAssets[rep.AssetID]) {
 			toAdd = append(toAdd, rep.AssetID)
 		}
 	}
@@ -1073,218 +994,7 @@ func (r *Reconciler) DryRun(ctx context.Context) ([]Action, error) {
 	if err != nil {
 		return nil, err
 	}
-	actions := []Action{}
-	sourceDeltas := map[string]int{}
-	removalCandidates := map[string]bool{}
-	for _, album := range albums {
-		add := func(action Action) {
-			action.AlbumID = album.ID
-			action.AlbumName = album.Name
-			actions = append(actions, action)
-		}
-		reps, err := r.DB.AlbumReplicas(album.ID)
-		if err != nil {
-			return nil, err
-		}
-		desired, err := r.DB.Memberships(album.ID)
-		if err != nil {
-			return nil, err
-		}
-		adds := map[string]bool{}
-		removes := map[string]bool{}
-		actual := map[string]map[string]bool{}
-		for _, m := range r.C.Members {
-			albumID := reps[m.ID]
-			if albumID == "" {
-				add(Action{Kind: "create_album_replica", MemberID: m.ID})
-				continue
-			}
-			remoteAlbum, err := r.API.GetAlbum(ctx, m, albumID)
-			if err != nil {
-				return nil, fmt.Errorf("get album for %s: %w", m.ID, err)
-			}
-			if remoteAlbum.OwnerID != "" && remoteAlbum.OwnerID != m.UserID {
-				add(Action{Kind: "mapping_inconsistency", MemberID: m.ID, Error: "album owner mismatch"})
-				continue
-			}
-			if remoteAlbum.Name != album.Name || remoteAlbum.Description != album.Description {
-				add(Action{Kind: "update_album_metadata", MemberID: m.ID})
-			}
-			if album.CoverID != "" {
-				cover, found, err := r.DB.Replica(album.CoverID, m.ID)
-				if err != nil {
-					return nil, err
-				}
-				if found && cover.AssetID != "" && cover.State == "ready" && remoteAlbum.CoverID != cover.AssetID {
-					add(Action{Kind: "update_album_cover", MemberID: m.ID, LogicalAssetID: album.CoverID, ImmichAssetID: cover.AssetID})
-				}
-			}
-			assets, err := r.API.ListAlbumAssets(ctx, m, albumID)
-			if err != nil {
-				return nil, err
-			}
-			prior, err := r.DB.Observations(album.ID, m.ID)
-			if err != nil {
-				return nil, err
-			}
-			actual[m.ID] = map[string]bool{}
-			for _, asset := range assets {
-				actual[m.ID][asset.ID] = true
-				lid, known, e := r.DB.FindReplicaAsset(m.ID, asset.ID)
-				if e != nil {
-					return nil, e
-				}
-				if !known {
-					if asset.OwnerID != m.UserID || asset.LibraryID == m.LibraryID {
-						add(Action{Kind: "mapping_inconsistency", MemberID: m.ID, ImmichAssetID: asset.ID})
-						continue
-					}
-					sourceID := asset.ID
-					asset, e = r.API.GetAsset(ctx, m, sourceID)
-					if e != nil {
-						return nil, fmt.Errorf("inspect source asset %s: %w", sourceID, e)
-					}
-					if asset.OwnerID != m.UserID || asset.LibraryID == m.LibraryID {
-						add(Action{Kind: "mapping_inconsistency", MemberID: m.ID, ImmichAssetID: sourceID})
-						continue
-					}
-					if !asset.Supported() {
-						add(Action{Kind: "unsupported_asset", MemberID: m.ID, ImmichAssetID: asset.ID})
-						continue
-					}
-					mapped, e := r.mappedAsset(asset)
-					if e == nil {
-						_, e = r.FS.SourceInfo(mapped.OriginalPath)
-					}
-					if e != nil {
-						add(Action{Kind: "source_error", MemberID: m.ID, ImmichAssetID: asset.ID, Error: e.Error()})
-						continue
-					}
-					add(Action{Kind: "discover_origin", MemberID: m.ID, ImmichAssetID: asset.ID})
-					for _, other := range r.C.Members {
-						if other.ID != m.ID {
-							add(Action{Kind: "link_and_import", MemberID: other.ID, SourceMemberID: m.ID, ImmichAssetID: asset.ID})
-						}
-					}
-					continue
-				}
-				if !album.Initialized || !prior[asset.ID] {
-					adds[lid] = true
-				}
-			}
-			if album.Initialized {
-				for old := range prior {
-					if !actual[m.ID][old] {
-						_, checkErr := r.API.GetAsset(ctx, m, old)
-						if errors.Is(checkErr, immich.ErrNotFound) {
-							add(Action{Kind: "source_missing", MemberID: m.ID, ImmichAssetID: old})
-							continue
-						}
-						if checkErr != nil {
-							return nil, fmt.Errorf("check missing album asset for %s: %w", m.ID, checkErr)
-						}
-						lid, known, e := r.DB.FindReplicaAsset(m.ID, old)
-						if e != nil {
-							return nil, e
-						}
-						if known {
-							removes[lid] = true
-						}
-					}
-				}
-			}
-		}
-		for id := range adds {
-			if !desired[id] {
-				add(Action{Kind: "add_sharing_reference", LogicalAssetID: id})
-				sourceDeltas[id]++
-			}
-			desired[id] = true
-		}
-		for id := range removes {
-			if !adds[id] {
-				wasDesired := desired[id]
-				delete(desired, id)
-				if wasDesired {
-					add(Action{Kind: "remove_sharing_reference", LogicalAssetID: id})
-					sourceDeltas[id]--
-					removalCandidates[id] = true
-				}
-			}
-		}
-		for _, m := range r.C.Members {
-			if reps[m.ID] == "" {
-				continue
-			}
-			for id := range desired {
-				rep, found, e := r.DB.Replica(id, m.ID)
-				if e != nil {
-					return nil, e
-				}
-				if !found || rep.AssetID == "" {
-					add(Action{Kind: "link_and_import", MemberID: m.ID, LogicalAssetID: id})
-				} else if !actual[m.ID][rep.AssetID] {
-					add(Action{Kind: "add_album_asset", MemberID: m.ID, LogicalAssetID: id, ImmichAssetID: rep.AssetID})
-				}
-			}
-			for assetID := range actual[m.ID] {
-				lid, known, e := r.DB.FindReplicaAsset(m.ID, assetID)
-				if e != nil {
-					return nil, e
-				}
-				if known && !desired[lid] {
-					add(Action{Kind: "remove_album_asset", MemberID: m.ID, LogicalAssetID: lid, ImmichAssetID: assetID})
-				}
-			}
-		}
-	}
-	if r.C.RemoveUnshared {
-		seen := map[string]bool{}
-		for logicalID := range removalCandidates {
-			count, err := r.DB.SourceCount(logicalID)
-			if err != nil {
-				return nil, err
-			}
-			if count+sourceDeltas[logicalID] != 0 {
-				continue
-			}
-			replicas, err := r.DB.ReplicasFor(logicalID)
-			if err != nil {
-				return nil, err
-			}
-			for _, replica := range replicas {
-				if replica.Role != "external_replica" {
-					continue
-				}
-				key := replica.LogicalID + "\x00" + replica.MemberID
-				seen[key] = true
-				actions = append(actions, Action{Kind: "delete_recipient_replica", MemberID: replica.MemberID, LogicalAssetID: replica.LogicalID, ImmichAssetID: replica.AssetID})
-			}
-		}
-		pending, err := r.DB.RemovalReplicas(removalBatchSize)
-		if err != nil {
-			return nil, err
-		}
-		for _, replica := range pending {
-			key := replica.LogicalID + "\x00" + replica.MemberID
-			if seen[key] {
-				continue
-			}
-			actions = append(actions, Action{Kind: "delete_recipient_replica", MemberID: replica.MemberID, LogicalAssetID: replica.LogicalID, ImmichAssetID: replica.AssetID})
-		}
-	}
-	sort.Slice(actions, func(i, j int) bool {
-		a, b := actions[i], actions[j]
-		left := [...]string{a.AlbumID, a.Kind, a.MemberID, a.SourceMemberID, a.LogicalAssetID, a.ImmichAssetID}
-		right := [...]string{b.AlbumID, b.Kind, b.MemberID, b.SourceMemberID, b.LogicalAssetID, b.ImmichAssetID}
-		for k := range left {
-			if left[k] != right[k] {
-				return left[k] < right[k]
-			}
-		}
-		return false
-	})
-	return actions, nil
+	return r.previewPlans(ctx, albums)
 }
 
 func (r *Reconciler) Check(ctx context.Context) error {
