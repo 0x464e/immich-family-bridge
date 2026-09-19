@@ -14,6 +14,8 @@ Observed API behavior:
 
 End-to-end reconciliation checked the initial union of three owned photos into each member's “Together” album, a second album referencing one photo, removal and re-addition from different members, a newly uploaded fourth photo, retained recipient files and `pending_removal` after the last sharing reference was removed, and restoration when re-added. A brief Immich outage made `/readyz` return 503; it returned 200 after Immich recovered. Restarting the bridge preserved four logical assets, two logical albums, twelve ready asset mappings, eight recipient files with matching source inodes, and an empty dry run.
 
+The opt-in `remove_unshared_replicas` flow was later validated against Immich 3.2.2 with both an ordinary image and an image with an associated XMP. It removed translated album membership, waited one cycle in `pending_removal`, force-deleted only recipient Immich assets, retained the origin media and XMP, and removed leftover recipient hardlinks after exact inode checks. The bridge was force-killed after persisting `pending_removal`; on restart it completed both recipient deletions. Re-adding both origins recreated and imported all replicas, including the XMP association.
+
 This initial validation covered the tested instance and the ordinary JPEG path. Live Photos, motion photos, stacks, edits, videos, public links, and destructive cleanup were not exercised. Validate those separately before extending support.
 
 ## Larger delayed-import run (2026-09-18)

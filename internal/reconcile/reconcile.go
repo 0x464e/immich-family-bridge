@@ -42,6 +42,7 @@ const (
 	lookupBatchSize  = 500
 	auditBatchSize   = 200
 	albumBatchSize   = 100
+	removalBatchSize = 100
 )
 
 func New(c config.Config, db *store.Store, api immich.Client, log *slog.Logger) *Reconciler {
@@ -343,6 +344,13 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Cleanup runs before MarkUnused so a newly removed sharing reference gets
+	// one full polling interval to be re-added before destructive work begins.
+	if r.C.RemoveUnshared {
+		if e := r.cleanupUnusedReplicas(ctx); e != nil {
+			errs = append(errs, e)
+		}
+	}
 	if e := r.DB.MarkUnused(); e != nil {
 		errs = append(errs, e)
 	}
@@ -359,6 +367,170 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (r *Reconciler) cleanupUnusedReplicas(ctx context.Context) error {
+	replicas, err := r.DB.RemovalReplicas(removalBatchSize)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, replica := range replicas {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		count, err := r.DB.SourceCount(replica.LogicalID)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if count != 0 {
+			continue
+		}
+		member, ok := r.member(replica.MemberID)
+		if !ok {
+			errs = append(errs, fmt.Errorf("cleanup replica %s/%s: member missing", replica.LogicalID, replica.MemberID))
+			continue
+		}
+		if err := r.cleanupReplica(ctx, member, replica); err != nil {
+			if canceled := ctx.Err(); canceled != nil {
+				return canceled
+			}
+			replica.Error = err.Error()
+			_ = r.DB.UpsertReplica(replica)
+			r.Log.Warn("recipient replica cleanup pending", "logical_asset_id", replica.LogicalID, "member_id", replica.MemberID, "error", err)
+			errs = append(errs, fmt.Errorf("cleanup replica %s/%s: %w", replica.LogicalID, replica.MemberID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (r *Reconciler) cleanupReplica(ctx context.Context, member domain.Member, replica domain.Replica) error {
+	remotePath, err := r.remoteRecipientPath(replica.Path)
+	if err != nil && replica.Path != "" {
+		return err
+	}
+	if replica.AssetID == "" && remotePath != "" {
+		found, err := r.API.FindByPath(ctx, member, remotePath)
+		if err != nil {
+			return err
+		}
+		if len(found) > 1 {
+			return fmt.Errorf("expected at most one imported asset at %s, got %d", remotePath, len(found))
+		}
+		if len(found) == 1 {
+			if found[0].OwnerID != member.UserID || found[0].LibraryID != member.LibraryID || found[0].OriginalPath != remotePath {
+				return errors.New("recipient asset identity mismatch during cleanup")
+			}
+			replica.AssetID = found[0].ID
+		} else {
+			// A scan already queued while the asset was shared may still import
+			// this path. Keep the hardlinks and mapping until that race settles;
+			// once imported, the normal verified deletion path removes it.
+			now := r.now()
+			if last := r.lastScanAt[member.ID]; last.IsZero() || now.Sub(last) >= r.scanInterval {
+				r.lastScanAt[member.ID] = now
+				if err := r.API.ScanLibrary(ctx, member); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	if replica.AssetID != "" {
+		asset, err := r.API.GetAsset(ctx, member, replica.AssetID)
+		if err == nil {
+			if asset.OwnerID != member.UserID || asset.LibraryID != member.LibraryID || asset.OriginalPath != remotePath {
+				return errors.New("recipient asset identity mismatch during cleanup")
+			}
+			if err := r.API.DeleteAssets(ctx, member, []string{replica.AssetID}); err != nil {
+				return err
+			}
+			replica.State = "deleting"
+			replica.Error = ""
+			if err := r.DB.UpsertReplica(replica); err != nil {
+				return err
+			}
+			r.Log.Info("recipient replica deletion requested", "logical_asset_id", replica.LogicalID, "member_id", replica.MemberID, "immich_asset_id", replica.AssetID)
+			return nil
+		}
+		if !errors.Is(err, immich.ErrNotFound) {
+			return err
+		}
+	}
+	if err := r.removeReplicaFiles(ctx, replica); err != nil {
+		return err
+	}
+	if err := r.DB.DeleteReplica(replica.LogicalID, replica.MemberID); err != nil {
+		return err
+	}
+	r.Log.Info("recipient replica removed", "logical_asset_id", replica.LogicalID, "member_id", replica.MemberID)
+	return nil
+}
+
+func (r *Reconciler) remoteRecipientPath(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	rel, err := filepath.Rel(r.C.BridgeRoot, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("recipient path outside bridge root")
+	}
+	remote := filepath.Join(r.C.ImmichBridgeRoot, rel)
+	if !strings.HasPrefix(remote, r.C.ImmichBridgeRoot+string(filepath.Separator)) {
+		return "", errors.New("invalid remote recipient path")
+	}
+	return remote, nil
+}
+
+func (r *Reconciler) removeReplicaFiles(ctx context.Context, replica domain.Replica) error {
+	components, err := r.DB.ReplicaFiles(replica.LogicalID, replica.MemberID)
+	if err != nil {
+		return err
+	}
+	kinds := make([]string, 0, len(components))
+	for kind := range components {
+		kinds = append(kinds, kind)
+	}
+	// Remove companions before the original. Immich may already have removed
+	// either path, which Linker.Remove treats as success.
+	sort.Slice(kinds, func(i, j int) bool {
+		if kinds[i] == "original" {
+			return false
+		}
+		if kinds[j] == "original" {
+			return true
+		}
+		return kinds[i] < kinds[j]
+	})
+	for _, kind := range kinds {
+		component := components[kind]
+		if err := r.FS.Remove(component.SourcePath, component.RecipientPath); err != nil {
+			return fmt.Errorf("remove %s component: %w", kind, err)
+		}
+	}
+	if len(components) == 0 && replica.Path != "" {
+		logical, err := r.DB.LogicalAsset(replica.LogicalID)
+		if err != nil {
+			return err
+		}
+		origin, ok := r.member(logical.OriginMember)
+		if !ok {
+			return errors.New("origin member missing")
+		}
+		asset, err := r.API.GetAsset(ctx, origin, logical.OriginAsset)
+		if err != nil {
+			return fmt.Errorf("inspect origin during cleanup: %w", err)
+		}
+		asset, err = r.mappedAsset(asset)
+		if err != nil {
+			return err
+		}
+		if err := r.FS.Remove(asset.OriginalPath, replica.Path); err != nil {
+			return fmt.Errorf("remove original component: %w", err)
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) runAlbum(ctx context.Context, a domain.LogicalAlbum) error {
@@ -883,6 +1055,8 @@ func (a Action) Message() string {
 		return "dry-run: would add member asset to album"
 	case "remove_album_asset":
 		return "dry-run: would remove member asset from album"
+	case "delete_recipient_replica":
+		return "dry-run: would delete unshared recipient asset and hardlinks"
 	case "update_album_metadata":
 		return "dry-run: would update member album name or description"
 	case "update_album_cover":
@@ -900,6 +1074,8 @@ func (r *Reconciler) DryRun(ctx context.Context) ([]Action, error) {
 		return nil, err
 	}
 	actions := []Action{}
+	sourceDeltas := map[string]int{}
+	removalCandidates := map[string]bool{}
 	for _, album := range albums {
 		add := func(action Action) {
 			action.AlbumID = album.ID
@@ -1021,6 +1197,7 @@ func (r *Reconciler) DryRun(ctx context.Context) ([]Action, error) {
 		for id := range adds {
 			if !desired[id] {
 				add(Action{Kind: "add_sharing_reference", LogicalAssetID: id})
+				sourceDeltas[id]++
 			}
 			desired[id] = true
 		}
@@ -1030,6 +1207,8 @@ func (r *Reconciler) DryRun(ctx context.Context) ([]Action, error) {
 				delete(desired, id)
 				if wasDesired {
 					add(Action{Kind: "remove_sharing_reference", LogicalAssetID: id})
+					sourceDeltas[id]--
+					removalCandidates[id] = true
 				}
 			}
 		}
@@ -1059,6 +1238,41 @@ func (r *Reconciler) DryRun(ctx context.Context) ([]Action, error) {
 			}
 		}
 	}
+	if r.C.RemoveUnshared {
+		seen := map[string]bool{}
+		for logicalID := range removalCandidates {
+			count, err := r.DB.SourceCount(logicalID)
+			if err != nil {
+				return nil, err
+			}
+			if count+sourceDeltas[logicalID] != 0 {
+				continue
+			}
+			replicas, err := r.DB.ReplicasFor(logicalID)
+			if err != nil {
+				return nil, err
+			}
+			for _, replica := range replicas {
+				if replica.Role != "external_replica" {
+					continue
+				}
+				key := replica.LogicalID + "\x00" + replica.MemberID
+				seen[key] = true
+				actions = append(actions, Action{Kind: "delete_recipient_replica", MemberID: replica.MemberID, LogicalAssetID: replica.LogicalID, ImmichAssetID: replica.AssetID})
+			}
+		}
+		pending, err := r.DB.RemovalReplicas(removalBatchSize)
+		if err != nil {
+			return nil, err
+		}
+		for _, replica := range pending {
+			key := replica.LogicalID + "\x00" + replica.MemberID
+			if seen[key] {
+				continue
+			}
+			actions = append(actions, Action{Kind: "delete_recipient_replica", MemberID: replica.MemberID, LogicalAssetID: replica.LogicalID, ImmichAssetID: replica.AssetID})
+		}
+	}
 	sort.Slice(actions, func(i, j int) bool {
 		a, b := actions[i], actions[j]
 		left := [...]string{a.AlbumID, a.Kind, a.MemberID, a.SourceMemberID, a.LogicalAssetID, a.ImmichAssetID}
@@ -1081,6 +1295,22 @@ func (r *Reconciler) Check(ctx context.Context) error {
 		}
 		if id != m.UserID {
 			return fmt.Errorf("member %s API key belongs to %s", m.ID, id)
+		}
+		if r.C.RemoveUnshared {
+			permissions, err := r.API.Permissions(ctx, m)
+			if err != nil {
+				return fmt.Errorf("member %s API key permissions: %w", m.ID, err)
+			}
+			allowed := false
+			for _, permission := range permissions {
+				if permission == "asset.delete" || permission == "all" {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("member %s API key requires asset.delete when remove_unshared_replicas is enabled", m.ID)
+			}
 		}
 		library, err := r.API.GetLibrary(ctx, m)
 		if err != nil {

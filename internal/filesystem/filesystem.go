@@ -107,6 +107,35 @@ func (l Linker) Ensure(source, dest string) error {
 	return nil
 }
 
+// Remove unlinks a bridge-managed destination only when it is still a hardlink
+// to the expected source. A destination already removed by Immich is success.
+func (l Linker) Remove(source, dest string) error {
+	if l.ReadOnly {
+		return ErrReadOnly
+	}
+	if !within(l.BridgeRoot, dest) {
+		return errors.New("unlink path outside configured root")
+	}
+	src, err := l.SourceInfo(source)
+	if err != nil {
+		return err
+	}
+	if err := noSymlink(filepath.Dir(dest)); err != nil {
+		return err
+	}
+	dst, err := os.Lstat(dest)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !dst.Mode().IsRegular() || !os.SameFile(src, dst) {
+		return ErrConflict
+	}
+	return os.Remove(dest)
+}
+
 func (l Linker) SourceInfo(source string) (os.FileInfo, error) {
 	if !within(l.SourceRoot, source) || within(l.BridgeRoot, source) {
 		return nil, errors.New("source path outside configured source root")

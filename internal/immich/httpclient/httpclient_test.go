@@ -3,6 +3,7 @@ package httpclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/0x464e/immich-family-bridge/internal/domain"
+	"github.com/0x464e/immich-family-bridge/internal/immich"
 )
 
 func TestPinnedOpenAPISubset(t *testing.T) {
@@ -34,7 +36,7 @@ func TestPinnedOpenAPISubset(t *testing.T) {
 	if spec.Info.Version != "3.2.2" {
 		t.Fatalf("spec version %s", spec.Info.Version)
 	}
-	for path, method := range map[string]string{"/users/me": "get", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post"} {
+	for path, method := range map[string]string{"/users/me": "get", "/assets": "delete", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post"} {
 		if spec.Paths[path][method] == nil {
 			t.Fatalf("missing %s %s", method, path)
 		}
@@ -165,6 +167,24 @@ func TestGetAssetIncludesSupportedSidecarPath(t *testing.T) {
 	}
 }
 
+func TestGetAssetConfirmsImmich400AsMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/assets/missing":
+			http.Error(w, `{"message":"Not found or no asset.read access"}`, http.StatusBadRequest)
+		case "/api/search/metadata":
+			_, _ = w.Write([]byte(`{"assets":{"items":[],"nextCursor":null}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	if _, err := c.GetAsset(context.Background(), domain.Member{Key: "member"}, "missing"); !errors.Is(err, immich.ErrNotFound) {
+		t.Fatalf("missing asset error: %v", err)
+	}
+}
+
 func TestSidecarJobsUseDocumentedRequests(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +221,45 @@ func TestSidecarJobsUseDocumentedRequests(t *testing.T) {
 	}
 }
 
+func TestDeleteAssetsUsesForcedMemberRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/assets" || r.Header.Get("x-api-key") != "member" {
+			t.Errorf("delete request: %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			IDs   []string `json:"ids"`
+			Force bool     `json:"force"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if !body.Force || len(body.IDs) != 1 || body.IDs[0] != "asset" {
+			t.Errorf("delete body: %#v", body)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	if err := c.DeleteAssets(context.Background(), domain.Member{Key: "member"}, []string{"asset"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPermissionsReadsCurrentAPIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/api-keys/me" || r.Header.Get("x-api-key") != "member" {
+			t.Errorf("permissions request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"permissions":["asset.read","asset.delete"]}`))
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	permissions, err := c.Permissions(context.Background(), domain.Member{Key: "member"})
+	if err != nil || len(permissions) != 2 || permissions[1] != "asset.delete" {
+		t.Fatalf("permissions: %#v, %v", permissions, err)
+	}
+}
+
 func TestReadOnlyClientAllowsSearchButBlocksWrites(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -226,6 +285,7 @@ func TestReadOnlyClientAllowsSearchButBlocksWrites(t *testing.T) {
 		func() error { return c.UpdateAlbum(context.Background(), m, "album", "name", "description", "") },
 		func() error { return c.AddAssets(context.Background(), m, "album", []string{"asset"}) },
 		func() error { return c.RemoveAssets(context.Background(), m, "album", []string{"asset"}) },
+		func() error { return c.DeleteAssets(context.Background(), m, []string{"asset"}) },
 		func() error { return c.ScanLibrary(context.Background(), m) },
 		func() error { return c.DiscoverSidecars(context.Background()) },
 		func() error { return c.RefreshMetadata(context.Background(), m, []string{"asset"}) },

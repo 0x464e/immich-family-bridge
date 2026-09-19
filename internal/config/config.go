@@ -36,6 +36,7 @@ type Config struct {
 	APIToken          string          `yaml:"-"`
 	PollInterval      string          `yaml:"poll_interval"`
 	TogetherAlbumName string          `yaml:"together_album_name"`
+	RemoveUnshared    bool            `yaml:"remove_unshared_replicas"`
 	Members           []domain.Member `yaml:"members"`
 }
 

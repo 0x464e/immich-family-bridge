@@ -447,6 +447,46 @@ func (s *Store) SourceCount(logical string) (int, error) {
 }
 
 func (s *Store) MarkUnused() error {
-	_, err := s.DB.Exec(`UPDATE asset_replicas SET state='pending_removal' WHERE role='external_replica' AND logical_asset_id NOT IN (SELECT logical_asset_id FROM sharing_sources)`)
+	_, err := s.DB.Exec(`UPDATE asset_replicas SET state='pending_removal',error=NULL WHERE role='external_replica' AND state NOT IN ('pending_removal','deleting') AND logical_asset_id NOT IN (SELECT logical_asset_id FROM sharing_sources)`)
 	return err
+}
+
+func (s *Store) RemovalReplicas(limit int) ([]domain.Replica, error) {
+	rows, err := s.DB.Query(`SELECT logical_asset_id,member_id,COALESCE(immich_asset_id,''),role,COALESCE(filesystem_path,''),COALESCE(external_library_id,''),state,COALESCE(error,'') FROM asset_replicas WHERE role='external_replica' AND state IN ('pending_removal','deleting') ORDER BY logical_asset_id,member_id LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.Replica{}
+	for rows.Next() {
+		var replica domain.Replica
+		if err := rows.Scan(&replica.LogicalID, &replica.MemberID, &replica.AssetID, &replica.Role, &replica.Path, &replica.LibraryID, &replica.State, &replica.Error); err != nil {
+			return nil, err
+		}
+		out = append(out, replica)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteReplica(logicalID, memberID string) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DELETE FROM asset_replica_files WHERE logical_asset_id=? AND member_id=?`, logicalID, memberID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`DELETE FROM asset_replicas WHERE logical_asset_id=? AND member_id=? AND role='external_replica' AND state IN ('pending_removal','deleting')`, logicalID, memberID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return errors.New("replica removal state changed concurrently")
+	}
+	return tx.Commit()
 }
