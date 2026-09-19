@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.6](https://github.com/0x464e/immich-family-bridge/compare/v0.4.5...v0.4.6) (2026-09-19)
+
+
+### Bug Fixes
+
+* clean up unshared recipient replicas ([613afc1](https://github.com/0x464e/immich-family-bridge/commit/613afc138baa5c068b05885870601fa5aa863623))
+
 ## [0.4.5](https://github.com/0x464e/immich-family-bridge/compare/v0.4.4...v0.4.5) (2026-09-19)
 
 
