@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/0x464e/immich-family-bridge/compare/v0.1.0...v0.2.0) (2026-09-19)
+
+
+### Features
+
+* resolve shared Immich links across members ([73749e7](https://github.com/0x464e/immich-family-bridge/commit/73749e7a87ed0dc8308a6123217a2d7af205a2e9))
+
 ## 0.1.0 (2026-09-19)
 
 
