@@ -48,7 +48,7 @@ func (s *Store) Migrate() error {
 	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
-	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql"}
+	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql"}
 	var max int
 	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&max); err != nil {
 		return err
@@ -82,6 +82,35 @@ func (s *Store) Migrate() error {
 		}
 	}
 	return nil
+}
+
+// ClaimLibraryScan atomically reserves a library scan for a member. A new
+// claim is allowed when the previous scan's observed refresh timestamp
+// changed, or when the lease interval has elapsed. The timestamp and lease
+// are persisted so separate bridge processes and restarts cannot immediately
+// enqueue overlapping scans.
+func (s *Store) ClaimLibraryScan(memberID string, requestedAt time.Time, baselineRefreshedAt string, lease time.Duration) (bool, error) {
+	result, err := s.DB.Exec(`
+		INSERT INTO library_scan_state(member_id, requested_at_ns, baseline_refreshed_at)
+		VALUES(?,?,?)
+		ON CONFLICT(member_id) DO UPDATE SET
+			requested_at_ns=excluded.requested_at_ns,
+			baseline_refreshed_at=excluded.baseline_refreshed_at
+		WHERE (excluded.baseline_refreshed_at != '' AND library_scan_state.baseline_refreshed_at != excluded.baseline_refreshed_at)
+		   OR excluded.requested_at_ns - library_scan_state.requested_at_ns >= ?`,
+		memberID, requestedAt.UnixNano(), baselineRefreshedAt, lease.Nanoseconds())
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
+}
+
+// ReleaseLibraryScan removes a failed claim without deleting a newer claim
+// made by another process.
+func (s *Store) ReleaseLibraryScan(memberID string, requestedAt time.Time) error {
+	_, err := s.DB.Exec(`DELETE FROM library_scan_state WHERE member_id=? AND requested_at_ns=?`, memberID, requestedAt.UnixNano())
+	return err
 }
 
 func ID() string { var b [16]byte; _, _ = rand.Read(b[:]); return hex.EncodeToString(b[:]) }

@@ -29,6 +29,7 @@ type Reconciler struct {
 	batchCursor            map[string]string
 	lastScanAt             map[string]time.Time
 	scanInterval           time.Duration
+	scanLease              time.Duration
 	sidecarDiscoveryNeeded bool
 	lastSidecarDiscoveryAt time.Time
 	now                    func() time.Time
@@ -50,8 +51,38 @@ func New(c config.Config, db *store.Store, api immich.Client, log *slog.Logger) 
 		C: c, DB: db, API: api,
 		FS:  filesystem.Linker{SourceRoot: c.SourceRoot, BridgeRoot: c.BridgeRoot, ReadOnly: c.DryRun},
 		Log: log, batchCursor: map[string]string{}, lastScanAt: map[string]time.Time{},
-		scanInterval: 90 * time.Second, now: time.Now,
+		scanInterval: 90 * time.Second, scanLease: 10 * time.Minute, now: time.Now,
 	}
+}
+
+// requestLibraryScan makes scan requests single-flight across bridge
+// restarts and processes. Immich updates refreshedAt when the crawl finishes;
+// until that changes, the persisted lease prevents another full scan.
+func (r *Reconciler) requestLibraryScan(ctx context.Context, member domain.Member) (bool, error) {
+	now := r.now()
+	if last := r.lastScanAt[member.ID]; !last.IsZero() && now.Sub(last) < r.scanInterval {
+		return false, nil
+	}
+	baseline := ""
+	if library, err := r.API.GetLibrary(ctx, member); err == nil && library.RefreshedAt != nil {
+		baseline = library.RefreshedAt.UTC().Format(time.RFC3339Nano)
+	}
+	lease := r.scanLease
+	// A zero scan interval is used by focused tests to request every retry
+	// immediately; preserve that behavior without weakening production leases.
+	if r.scanInterval == 0 {
+		lease = 0
+	}
+	claimed, err := r.DB.ClaimLibraryScan(member.ID, now, baseline, lease)
+	if err != nil || !claimed {
+		return false, err
+	}
+	if err := r.API.ScanLibrary(ctx, member); err != nil {
+		_ = r.DB.ReleaseLibraryScan(member.ID, now)
+		return false, err
+	}
+	r.lastScanAt[member.ID] = now
+	return true, nil
 }
 func (r *Reconciler) member(id string) (domain.Member, bool) {
 	for _, m := range r.C.Members {
@@ -437,12 +468,8 @@ func (r *Reconciler) cleanupReplica(ctx context.Context, member domain.Member, r
 			// A scan already queued while the asset was shared may still import
 			// this path. Keep the hardlinks and mapping until that race settles;
 			// once imported, the normal verified deletion path removes it.
-			now := r.now()
-			if last := r.lastScanAt[member.ID]; last.IsZero() || now.Sub(last) >= r.scanInterval {
-				r.lastScanAt[member.ID] = now
-				if err := r.API.ScanLibrary(ctx, member); err != nil {
-					return err
-				}
+			if _, err := r.requestLibraryScan(ctx, member); err != nil {
+				return err
 			}
 			return nil
 		}
@@ -702,17 +729,14 @@ func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, 
 	}
 	scanned := false
 	if len(pending) > 0 {
-		now := r.now()
-		if last := r.lastScanAt[o.member.ID]; last.IsZero() || now.Sub(last) >= r.scanInterval {
-			r.lastScanAt[o.member.ID] = now
-			if err := r.API.ScanLibrary(ctx, o.member); err != nil {
-				if canceled := ctx.Err(); canceled != nil {
-					return canceled
-				}
-				r.Log.Warn("recipient library scan request failed", "member_id", o.member.ID, "error", err)
-			} else {
-				scanned = true
+		requested, err := r.requestLibraryScan(ctx, o.member)
+		if err != nil {
+			if canceled := ctx.Err(); canceled != nil {
+				return canceled
 			}
+			r.Log.Warn("recipient library scan request failed", "member_id", o.member.ID, "error", err)
+		} else {
+			scanned = requested
 		}
 	}
 	pendingIDs := make([]string, 0, len(pending))

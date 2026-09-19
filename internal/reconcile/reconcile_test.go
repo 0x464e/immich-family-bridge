@@ -151,6 +151,9 @@ func TestLargeDelayedImportUsesBoundedWorkAndCoalescedScans(t *testing.T) {
 		t.Fatalf("bounded preparation did not cover 520 assets: %+v", states)
 	}
 	api.BlockScans(false)
+	// This test advances the fake clock by two minutes; bypass the production
+	// stale-claim lease so it can exercise the next retry immediately.
+	r.scanLease = 0
 	clock = clock.Add(2 * time.Minute)
 	for i := 0; i < 3; i++ {
 		if err := r.Run(ctx); err != nil {
@@ -599,6 +602,8 @@ func TestNUserAlbumFlowRestartAndReferences(t *testing.T) {
 		t.Fatal(e)
 	}
 	r2 := New(c, db, api2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Disable the production scan lease so this unit test can force an immediate retry.
+	r2.scanInterval = 0
 	if e := r2.Run(ctx); e != nil {
 		t.Fatal("restart failed:", e)
 	}

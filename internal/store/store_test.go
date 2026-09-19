@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/0x464e/immich-family-bridge/internal/domain"
 )
@@ -45,11 +46,35 @@ func TestPersistenceAndMigrations(t *testing.T) {
 		t.Fatalf("mapping lost on restart: %+v %v", rep, e)
 	}
 	var version int
-	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 4 {
+	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 5 {
 		t.Fatalf("migration version %d %v", version, e)
 	}
 	if _, e := s.DB.Exec(`INSERT INTO asset_replica_files(logical_asset_id,member_id,component_kind,source_path,recipient_path,state) VALUES(?,?,?,?,?,?)`, id, "b", "original", "/fixture/a.jpg", "/fixture/bridge/b.jpg", "ready"); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestLibraryScanClaimIsPersistentAndAtomic(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "bridge.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Init("family", []domain.Member{{ID: "a", UserID: "u-a", LibraryID: "l-a"}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0)
+	if ok, err := s.ClaimLibraryScan("a", now, "before", time.Minute); err != nil || !ok {
+		t.Fatalf("first claim = %v, %v", ok, err)
+	}
+	if ok, err := s.ClaimLibraryScan("a", now.Add(30*time.Second), "before", time.Minute); err != nil || ok {
+		t.Fatalf("early second claim = %v, %v", ok, err)
+	}
+	if ok, err := s.ClaimLibraryScan("a", now.Add(31*time.Second), "after", time.Minute); err != nil || !ok {
+		t.Fatalf("completed scan claim = %v, %v", ok, err)
+	}
+	if ok, err := s.ClaimLibraryScan("a", now.Add(32*time.Second), "after", time.Minute); err != nil || ok {
+		t.Fatalf("duplicate claim = %v, %v", ok, err)
 	}
 }
 

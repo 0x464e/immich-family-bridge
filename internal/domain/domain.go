@@ -1,6 +1,9 @@
 package domain
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"time"
+)
 
 type Member struct {
 	ID        string `json:"id" yaml:"id"`
@@ -82,9 +85,10 @@ type Album struct {
 }
 
 type Library struct {
-	ID          string   `json:"id"`
-	OwnerID     string   `json:"ownerId"`
-	ImportPaths []string `json:"importPaths"`
+	ID          string     `json:"id"`
+	OwnerID     string     `json:"ownerId"`
+	ImportPaths []string   `json:"importPaths"`
+	RefreshedAt *time.Time `json:"refreshedAt"`
 }
 
 type LogicalAsset struct {
