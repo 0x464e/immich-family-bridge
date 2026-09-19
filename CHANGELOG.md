@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5](https://github.com/0x464e/immich-family-bridge/compare/v0.4.4...v0.4.5) (2026-09-19)
+
+
+### Bug Fixes
+
+* support XMP sidecar components ([cdfe859](https://github.com/0x464e/immich-family-bridge/commit/cdfe859ab593f07f6d48565478c671bd972f5885))
+
 ## [0.4.4](https://github.com/0x464e/immich-family-bridge/compare/v0.4.3...v0.4.4) (2026-09-18)
 
 
