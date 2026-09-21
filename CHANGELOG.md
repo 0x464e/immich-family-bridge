@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.1](https://github.com/0x464e/immich-family-bridge/compare/v0.3.0...v0.3.1) (2026-09-21)
+
+
+### Miscellaneous Chores
+
+* **ci:** configure release please changelog sections ([30f2f5e](https://github.com/0x464e/immich-family-bridge/commit/30f2f5ebbe94686bcc6e534127f0d010a4c3a282))
+
+
+### Code Refactoring
+
+* separate discovery from bounded reconciliation work ([#4](https://github.com/0x464e/immich-family-bridge/issues/4)) ([6f79308](https://github.com/0x464e/immich-family-bridge/commit/6f793088cbaf070cb111f5a4687e31b069c4687c))
+
 ## [0.3.0](https://github.com/0x464e/immich-family-bridge/compare/v0.2.0...v0.3.0) (2026-09-21)
 
 
