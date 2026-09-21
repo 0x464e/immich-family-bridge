@@ -198,8 +198,37 @@ func (a assetDTO) domain() domain.Asset {
 	if a.LivePhotoVideoID != nil {
 		x.LivePhotoVideoID = *a.LivePhotoVideoID
 	}
-	x.Stacked = len(a.Stack) > 0 && string(a.Stack) != "null"
+	if len(a.Stack) > 0 && string(a.Stack) != "null" {
+		var stack struct {
+			ID             string `json:"id"`
+			PrimaryAssetID string `json:"primaryAssetId"`
+		}
+		if json.Unmarshal(a.Stack, &stack) == nil {
+			x.StackID, x.StackPrimaryID = stack.ID, stack.PrimaryAssetID
+		}
+	}
 	return x
+}
+
+type stackDTO struct {
+	ID             string     `json:"id"`
+	OwnerID        string     `json:"ownerId"`
+	PrimaryAssetID string     `json:"primaryAssetId"`
+	Assets         []assetDTO `json:"assets"`
+}
+
+func (s stackDTO) domain() domain.Stack {
+	out := domain.Stack{ID: s.ID, OwnerID: s.OwnerID, PrimaryAssetID: s.PrimaryAssetID, Assets: make([]domain.Asset, 0, len(s.Assets))}
+	for _, asset := range s.Assets {
+		out.Assets = append(out.Assets, asset.domain())
+	}
+	return out
+}
+
+func (c *Client) GetStack(ctx context.Context, m domain.Member, id string) (domain.Stack, error) {
+	var stack stackDTO
+	err := c.request(ctx, m.Key, "GET", "/stacks/"+url.PathEscape(id), nil, &stack)
+	return stack.domain(), err
 }
 
 type albumDTO struct {
@@ -292,7 +321,10 @@ func (c *Client) search(ctx context.Context, m domain.Member, filter map[string]
 	return nil, errors.New("immich search page limit exceeded")
 }
 func (c *Client) ListAlbumAssets(ctx context.Context, m domain.Member, id string) ([]domain.Asset, error) {
-	return c.search(ctx, m, map[string]any{"albumIds": []string{id}, "size": 1000})
+	// Immich otherwise omits children of a stack from search results. Album
+	// membership must observe every member so a source stack cannot look like
+	// an unshare of its non-primary assets.
+	return c.search(ctx, m, map[string]any{"albumIds": []string{id}, "size": 1000, "withStacked": true})
 }
 func (c *Client) CreateAlbum(ctx context.Context, m domain.Member, logicalID, name, desc string) (domain.Album, error) {
 	var a albumDTO
@@ -314,6 +346,16 @@ func (c *Client) RemoveAssets(ctx context.Context, m domain.Member, id string, a
 }
 func (c *Client) DeleteAssets(ctx context.Context, m domain.Member, assets []string) error {
 	return c.request(ctx, m.Key, "DELETE", "/assets", map[string]any{"ids": assets, "force": true}, nil)
+}
+
+func (c *Client) CreateStack(ctx context.Context, m domain.Member, assets []string) (domain.Stack, error) {
+	var stack stackDTO
+	err := c.request(ctx, m.Key, "POST", "/stacks", map[string]any{"assetIds": assets}, &stack)
+	return stack.domain(), err
+}
+
+func (c *Client) DeleteStack(ctx context.Context, m domain.Member, id string) error {
+	return c.request(ctx, m.Key, "DELETE", "/stacks/"+url.PathEscape(id), nil, nil)
 }
 func (c *Client) changeAssets(ctx context.Context, m domain.Member, id string, assets []string, method string) error {
 	var result []struct {

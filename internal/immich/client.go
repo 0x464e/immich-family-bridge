@@ -14,6 +14,7 @@ type Client interface {
 	Permissions(context.Context, domain.Member) ([]string, error)
 	GetLibrary(context.Context, domain.Member) (domain.Library, error)
 	GetAsset(context.Context, domain.Member, string) (domain.Asset, error)
+	GetStack(context.Context, domain.Member, string) (domain.Stack, error)
 	GetAlbum(context.Context, domain.Member, string) (domain.Album, error)
 	ListAlbums(context.Context, domain.Member) ([]domain.Album, error)
 	ListAlbumAssets(context.Context, domain.Member, string) ([]domain.Asset, error)
@@ -22,6 +23,8 @@ type Client interface {
 	AddAssets(context.Context, domain.Member, string, []string) error
 	RemoveAssets(context.Context, domain.Member, string, []string) error
 	DeleteAssets(context.Context, domain.Member, []string) error
+	CreateStack(context.Context, domain.Member, []string) (domain.Stack, error)
+	DeleteStack(context.Context, domain.Member, string) error
 	ScanLibrary(context.Context, domain.Member) error
 	DiscoverSidecars(context.Context) error
 	RefreshMetadata(context.Context, domain.Member, []string) error

@@ -22,6 +22,12 @@ type State struct {
 	Assets     map[string]domain.Asset    `json:"assets"`
 	Albums     map[string]domain.Album    `json:"albums"`
 	Membership map[string]map[string]bool `json:"membership"`
+	Stacks     map[string]fakeStack       `json:"stacks"`
+}
+
+type fakeStack struct {
+	ID, OwnerID, PrimaryAssetID string
+	AssetIDs                    []string
 }
 
 // Seed is used only by unit tests. The running service never constructs this client.
@@ -46,7 +52,7 @@ type Client struct {
 }
 
 func New(c config.Config, statePath string, data Seed) (*Client, error) {
-	f := &Client{config: c, statePath: statePath, state: State{Assets: map[string]domain.Asset{}, Albums: map[string]domain.Album{}, Membership: map[string]map[string]bool{}}}
+	f := &Client{config: c, statePath: statePath, state: State{Assets: map[string]domain.Asset{}, Albums: map[string]domain.Album{}, Membership: map[string]map[string]bool{}, Stacks: map[string]fakeStack{}}}
 	seed := true
 	if b, err := os.ReadFile(statePath); err == nil {
 		if err := json.Unmarshal(b, &f.state); err != nil {
@@ -64,6 +70,9 @@ func New(c config.Config, statePath string, data Seed) (*Client, error) {
 	}
 	if f.state.Membership == nil {
 		f.state.Membership = map[string]map[string]bool{}
+	}
+	if f.state.Stacks == nil {
+		f.state.Stacks = map[string]fakeStack{}
 	}
 	for _, a := range data.Assets {
 		if !seed {
@@ -127,6 +136,46 @@ func (f *Client) SetSidecar(id, path string) error {
 	f.state.Assets[id] = asset
 	return f.save()
 }
+
+func (f *Client) AddAsset(id, memberID, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m, ok := f.member(memberID)
+	if !ok {
+		return errors.New("unknown fake member")
+	}
+	f.state.Assets[id] = domain.Asset{ID: id, OwnerID: m.UserID, OriginalPath: path, OriginalFileName: filepath.Base(path), Type: "IMAGE"}
+	return f.save()
+}
+
+// SetStack is a test helper that makes the first supplied source asset the
+// primary member of a source stack.
+func (f *Client) SetStack(memberID, stackID string, assetIDs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m, ok := f.member(memberID)
+	if !ok || len(assetIDs) < 2 {
+		return errors.New("invalid fake stack")
+	}
+	if prior, found := f.state.Stacks[stackID]; found {
+		for _, id := range prior.AssetIDs {
+			if a, exists := f.state.Assets[id]; exists && a.StackID == stackID {
+				a.StackID, a.StackPrimaryID = "", ""
+				f.state.Assets[id] = a
+			}
+		}
+	}
+	for _, id := range assetIDs {
+		a, found := f.state.Assets[id]
+		if !found || a.OwnerID != m.UserID {
+			return errors.New("fake stack asset owner mismatch")
+		}
+		a.StackID, a.StackPrimaryID = stackID, assetIDs[0]
+		f.state.Assets[id] = a
+	}
+	f.state.Stacks[stackID] = fakeStack{ID: stackID, OwnerID: m.UserID, PrimaryAssetID: assetIDs[0], AssetIDs: append([]string(nil), assetIDs...)}
+	return f.save()
+}
 func (f *Client) member(id string) (domain.Member, bool) {
 	for _, m := range f.config.Members {
 		if m.ID == id {
@@ -185,6 +234,25 @@ func (f *Client) GetAsset(_ context.Context, m domain.Member, id string) (domain
 		return a, immich.ErrNotFound
 	}
 	return a, nil
+}
+
+func (f *Client) GetStack(_ context.Context, m domain.Member, id string) (domain.Stack, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return domain.Stack{}, err
+	}
+	stack, ok := f.state.Stacks[id]
+	if !ok || stack.OwnerID != m.UserID {
+		return domain.Stack{}, immich.ErrNotFound
+	}
+	out := domain.Stack{ID: stack.ID, OwnerID: stack.OwnerID, PrimaryAssetID: stack.PrimaryAssetID}
+	for _, assetID := range stack.AssetIDs {
+		if asset, ok := f.state.Assets[assetID]; ok {
+			out.Assets = append(out.Assets, asset)
+		}
+	}
+	return out, nil
 }
 func (f *Client) GetAlbum(_ context.Context, m domain.Member, id string) (domain.Album, error) {
 	f.mu.Lock()
@@ -291,6 +359,80 @@ func (f *Client) DeleteAssets(_ context.Context, m domain.Member, assets []strin
 		}
 	}
 	return f.save()
+}
+
+func (f *Client) CreateStack(_ context.Context, m domain.Member, assets []string) (domain.Stack, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return domain.Stack{}, err
+	}
+	if len(assets) < 2 {
+		return domain.Stack{}, errors.New("stack requires two assets")
+	}
+	for _, id := range assets {
+		a, ok := f.state.Assets[id]
+		if !ok || a.OwnerID != m.UserID {
+			return domain.Stack{}, errors.New("fake recipient stack asset owner mismatch")
+		}
+	}
+	sum := sha256.Sum256([]byte(m.UserID + "\x00" + strings.Join(assets, "\x00")))
+	id := "fake-stack-" + hex.EncodeToString(sum[:12])
+	for oldID, old := range f.state.Stacks {
+		if old.OwnerID != m.UserID {
+			continue
+		}
+		for _, oldAsset := range old.AssetIDs {
+			for _, newAsset := range assets {
+				if oldAsset == newAsset {
+					delete(f.state.Stacks, oldID)
+					break
+				}
+			}
+		}
+	}
+	for _, assetID := range assets {
+		a := f.state.Assets[assetID]
+		a.StackID, a.StackPrimaryID = id, assets[0]
+		f.state.Assets[assetID] = a
+	}
+	f.state.Stacks[id] = fakeStack{ID: id, OwnerID: m.UserID, PrimaryAssetID: assets[0], AssetIDs: append([]string(nil), assets...)}
+	if err := f.save(); err != nil {
+		return domain.Stack{}, err
+	}
+	return f.stackDomain(id)
+}
+
+func (f *Client) DeleteStack(_ context.Context, m domain.Member, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return err
+	}
+	stack, ok := f.state.Stacks[id]
+	if !ok || stack.OwnerID != m.UserID {
+		return immich.ErrNotFound
+	}
+	for _, assetID := range stack.AssetIDs {
+		if asset, ok := f.state.Assets[assetID]; ok && asset.StackID == id {
+			asset.StackID, asset.StackPrimaryID = "", ""
+			f.state.Assets[assetID] = asset
+		}
+	}
+	delete(f.state.Stacks, id)
+	return f.save()
+}
+
+func (f *Client) stackDomain(id string) (domain.Stack, error) {
+	stack, ok := f.state.Stacks[id]
+	if !ok {
+		return domain.Stack{}, immich.ErrNotFound
+	}
+	out := domain.Stack{ID: stack.ID, OwnerID: stack.OwnerID, PrimaryAssetID: stack.PrimaryAssetID}
+	for _, assetID := range stack.AssetIDs {
+		out.Assets = append(out.Assets, f.state.Assets[assetID])
+	}
+	return out, nil
 }
 func (f *Client) change(m domain.Member, id string, assets []string, add bool) error {
 	f.mu.Lock()

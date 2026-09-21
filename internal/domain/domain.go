@@ -21,7 +21,8 @@ type Asset struct {
 	OriginalFileName string `json:"originalFileName"`
 	Type             string `json:"type"`
 	LivePhotoVideoID string `json:"livePhotoVideoId"`
-	Stacked          bool   `json:"stacked"`
+	StackID          string `json:"stackId,omitempty"`
+	StackPrimaryID   string `json:"stackPrimaryAssetId,omitempty"`
 	Edited           bool   `json:"edited"`
 	Sidecar          bool   `json:"sidecar"`
 	SidecarPath      string `json:"sidecarPath,omitempty"`
@@ -38,9 +39,6 @@ func (a Asset) UnsupportedReason() string {
 	if a.LivePhotoVideoID != "" {
 		return "live_photo"
 	}
-	if a.Stacked {
-		return "stack"
-	}
 	if a.Edited {
 		return "edit"
 	}
@@ -54,6 +52,32 @@ func (a Asset) UnsupportedReason() string {
 		return "unsupported_sidecar"
 	}
 	return ""
+}
+
+// Stack is Immich's source-authoritative grouping of related assets. Assets
+// retain their individual identity and are replicated before this relationship
+// is created for each recipient.
+type Stack struct {
+	ID             string  `json:"id"`
+	OwnerID        string  `json:"ownerId"`
+	PrimaryAssetID string  `json:"primaryAssetId"`
+	Assets         []Asset `json:"assets"`
+}
+
+type SourceStack struct {
+	SourceMember string `json:"sourceMember"`
+	SourceStack  string `json:"sourceStack"`
+	PrimaryAsset string `json:"primaryAsset"`
+}
+
+type StackReplica struct {
+	SourceMember string `json:"sourceMember"`
+	SourceStack  string `json:"sourceStack"`
+	MemberID     string `json:"memberId"`
+	StackID      string `json:"stackId"`
+	Signature    string `json:"signature"`
+	State        string `json:"state"`
+	Error        string `json:"error,omitempty"`
 }
 
 func equalFoldExt(path, ext string) bool {

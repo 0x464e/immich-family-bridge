@@ -48,7 +48,7 @@ func (s *Store) Migrate() error {
 	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
-	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql", "migrations/006_album_cover_observations.sql"}
+	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql", "migrations/006_album_cover_observations.sql", "migrations/007_stacks.sql"}
 	var max int
 	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&max); err != nil {
 		return err
@@ -584,4 +584,57 @@ func (s *Store) DeleteReplica(logicalID, memberID string) error {
 		return errors.New("replica removal state changed concurrently")
 	}
 	return tx.Commit()
+}
+
+func (s *Store) UpsertSourceStack(stack domain.SourceStack) error {
+	_, err := s.DB.Exec(`INSERT INTO source_stacks(source_member_id,source_stack_id,primary_immich_asset_id)
+		VALUES(?,?,?)
+		ON CONFLICT(source_member_id,source_stack_id) DO UPDATE SET primary_immich_asset_id=excluded.primary_immich_asset_id`,
+		stack.SourceMember, stack.SourceStack, stack.PrimaryAsset)
+	return err
+}
+
+func (s *Store) SourceStacks() ([]domain.SourceStack, error) {
+	rows, err := s.DB.Query(`SELECT source_member_id,source_stack_id,primary_immich_asset_id FROM source_stacks ORDER BY source_member_id,source_stack_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.SourceStack{}
+	for rows.Next() {
+		var stack domain.SourceStack
+		if err := rows.Scan(&stack.SourceMember, &stack.SourceStack, &stack.PrimaryAsset); err != nil {
+			return nil, err
+		}
+		out = append(out, stack)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteSourceStack(sourceMember, sourceStack string) error {
+	_, err := s.DB.Exec(`DELETE FROM source_stacks WHERE source_member_id=? AND source_stack_id=?`, sourceMember, sourceStack)
+	return err
+}
+
+func (s *Store) StackReplica(sourceMember, sourceStack, member string) (domain.StackReplica, bool, error) {
+	var replica domain.StackReplica
+	err := s.DB.QueryRow(`SELECT source_member_id,source_stack_id,member_id,COALESCE(immich_stack_id,''),signature,state,COALESCE(error,'')
+		FROM stack_replicas WHERE source_member_id=? AND source_stack_id=? AND member_id=?`, sourceMember, sourceStack, member).
+		Scan(&replica.SourceMember, &replica.SourceStack, &replica.MemberID, &replica.StackID, &replica.Signature, &replica.State, &replica.Error)
+	if errors.Is(err, sql.ErrNoRows) {
+		return replica, false, nil
+	}
+	return replica, err == nil, err
+}
+
+func (s *Store) UpsertStackReplica(replica domain.StackReplica) error {
+	var stackID any
+	if replica.StackID != "" {
+		stackID = replica.StackID
+	}
+	_, err := s.DB.Exec(`INSERT INTO stack_replicas(source_member_id,source_stack_id,member_id,immich_stack_id,signature,state,error)
+		VALUES(?,?,?,?,?,?,?)
+		ON CONFLICT(source_member_id,source_stack_id,member_id) DO UPDATE SET immich_stack_id=excluded.immich_stack_id,signature=excluded.signature,state=excluded.state,error=excluded.error`,
+		replica.SourceMember, replica.SourceStack, replica.MemberID, stackID, replica.Signature, replica.State, replica.Error)
+	return err
 }

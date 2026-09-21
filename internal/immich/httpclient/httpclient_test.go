@@ -36,7 +36,7 @@ func TestPinnedOpenAPISubset(t *testing.T) {
 	if spec.Info.Version != "3.2.2" {
 		t.Fatalf("spec version %s", spec.Info.Version)
 	}
-	for path, method := range map[string]string{"/users/me": "get", "/assets": "delete", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post"} {
+	for path, method := range map[string]string{"/users/me": "get", "/assets": "delete", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post", "/stacks": "post", "/stacks/{id}": "get"} {
 		if spec.Paths[path][method] == nil {
 			t.Fatalf("missing %s %s", method, path)
 		}
@@ -107,6 +107,9 @@ func TestSearchReadsEveryPage(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Error(err)
 				}
+				if body["withStacked"] != true {
+					t.Errorf("stack children were not requested: %#v", body)
+				}
 				second := (mode == "page" && body["page"] == float64(2)) || (mode == "cursor" && body["cursor"] == "second")
 				items := make([]map[string]string, 0, 1000)
 				start, end := 0, 1000
@@ -133,6 +136,49 @@ func TestSearchReadsEveryPage(t *testing.T) {
 				t.Fatalf("pagination: count=%d calls=%d error=%v", len(assets), calls, err)
 			}
 		})
+	}
+}
+
+func TestStackRequests(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/stacks/source":
+			if r.Method != http.MethodGet {
+				t.Fatalf("GetStack method = %s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"id":"source","ownerId":"owner","primaryAssetId":"jpeg","assets":[{"id":"jpeg","ownerId":"owner","type":"IMAGE"},{"id":"dng","ownerId":"owner","type":"IMAGE"}]}`))
+		case "/api/stacks":
+			if r.Method != http.MethodPost {
+				t.Fatalf("CreateStack method = %s", r.Method)
+			}
+			var body map[string][]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if got := body["assetIds"]; len(got) != 2 || got[0] != "jpeg" || got[1] != "dng" {
+				t.Fatalf("stack asset order = %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"id":"target","ownerId":"owner","primaryAssetId":"jpeg"}`))
+		case "/api/stacks/target":
+			if r.Method != http.MethodDelete {
+				t.Fatalf("DeleteStack method = %s", r.Method)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	m := domain.Member{Key: "secret"}
+	stack, err := c.GetStack(context.Background(), m, "source")
+	if err != nil || stack.PrimaryAssetID != "jpeg" || len(stack.Assets) != 2 {
+		t.Fatalf("GetStack = %+v, %v", stack, err)
+	}
+	stack, err = c.CreateStack(context.Background(), m, []string{"jpeg", "dng"})
+	if err != nil || stack.ID != "target" || stack.PrimaryAssetID != "jpeg" {
+		t.Fatalf("CreateStack = %+v, %v", stack, err)
+	}
+	if err := c.DeleteStack(context.Background(), m, "target"); err != nil {
+		t.Fatal(err)
 	}
 }
 
