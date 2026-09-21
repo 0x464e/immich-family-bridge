@@ -76,3 +76,26 @@ Immich with HTTP 200. Direct bridge checks also verified the reverse direction,
 that a member's own mirror-album link returns `204`, and that an unregistered
 album returns `204`. The album resolver queries only `album_replicas`, so it
 does not translate ordinary Immich album links.
+
+## Bounded reconciliation pass (2026-09-21)
+
+The refactored bridge was built from this branch and run only against the
+disposable three-account Immich 3.2.2 setup, reusing its existing 1,807-asset
+Together albums. The first complete discovery took about 4.5 seconds with no
+errors. Subsequent work-only passes, including 25 ready-asset audits per member,
+took about 2.1 seconds at the test instance's 10-second work interval. The work
+passes did not search or patch albums. The disposable source and recipient
+libraries remained separate from production throughout.
+
+A live stack test caught a difference from the fake backend: Immich's album
+metadata search returned `stack: null` even after two existing source assets
+were stacked. The refactor now calls `GET /stacks` once per member during full
+discovery, filters out bridge-created recipient stacks, and processes source
+stacks in bounded batches. Rebuilding the disposable bridge discovered the
+retroactive source stack and created recipient stacks on both other accounts
+with the expected primary-asset mapping. Deleting the source stack and forcing
+a full reconcile removed both recipient stacks; all three accounts then had
+zero stacks. The test used existing disposable images, not production media.
+
+This validates the discovery/work split and one create/delete stack sequence;
+it is not a throughput or crash-recovery guarantee for a 25,000-asset library.

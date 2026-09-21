@@ -2,10 +2,58 @@ package reconcile
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/0x464e/immich-family-bridge/internal/domain"
+	"github.com/0x464e/immich-family-bridge/internal/immich"
 )
+
+type stackSweepClient struct {
+	immich.Client
+	read []string
+}
+
+func (c *stackSweepClient) GetStack(_ context.Context, member domain.Member, id string) (domain.Stack, error) {
+	c.read = append(c.read, id)
+	return domain.Stack{ID: id, OwnerID: member.UserID, PrimaryAssetID: "a1", Assets: []domain.Asset{{ID: "a1", OwnerID: member.UserID}, {ID: "unshared", OwnerID: member.UserID}}}, nil
+}
+
+func TestStackSweepIsBoundedAndCursorSurvivesRestart(t *testing.T) {
+	c, db, api, r := setup(t)
+	ctx := context.Background()
+	if _, err := r.Register(ctx, "alice", "trip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 51; i++ {
+		if err := db.UpsertSourceStack(domain.SourceStack{SourceMember: "alice", SourceStack: fmt.Sprintf("stack-%02d", i), PrimaryAsset: "a1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := &stackSweepClient{Client: api}
+	r1 := New(c, db, first, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := r1.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.read) != stackBatchSize || first.read[0] != "stack-00" || first.read[len(first.read)-1] != "stack-49" {
+		t.Fatalf("first stack batch: %v", first.read)
+	}
+	second := &stackSweepClient{Client: api}
+	r2 := New(c, db, second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := r2.Work(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(second.read) != stackBatchSize || second.read[0] != "stack-50" {
+		t.Fatalf("restart did not resume stack sweep: %v", second.read)
+	}
+}
 
 func addRawJPEGPair(t *testing.T, cpath string, api interface {
 	MoveAssetPath(string, string) error

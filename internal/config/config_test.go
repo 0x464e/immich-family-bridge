@@ -80,6 +80,9 @@ members:
 			if c.TogetherAlbumName != "Together" {
 				t.Fatalf("TogetherAlbumName=%q, want default Together", c.TogetherAlbumName)
 			}
+			if got, err := c.DiscoveryEvery(); err != nil || got.String() != "5m0s" {
+				t.Fatalf("DiscoveryEvery=%v, %v, want 5m", got, err)
+			}
 		})
 	}
 	if err := os.WriteFile(path, []byte("dry_run: false\n"+base), 0600); err != nil {
@@ -116,6 +119,11 @@ func TestSourceMappingsAndValidation(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	c.DiscoveryInterval = "bad"
+	if err := c.Validate(); err == nil {
+		t.Fatal("accepted invalid discovery interval")
+	}
+	c.DiscoveryInterval = "5m"
 	for input, want := range map[string]string{
 		"/data/library/photo.jpg": filepath.Join(upload, "library", "photo.jpg"),
 		"/external/picture.jpg":   filepath.Join(external, "picture.jpg"),

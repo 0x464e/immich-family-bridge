@@ -31,6 +31,9 @@ func TestPersistenceAndMigrations(t *testing.T) {
 	if e := s.UpsertReplica(domain.Replica{LogicalID: id, MemberID: "b", Role: "external_replica", Path: "/fixture/bridge/b.jpg", LibraryID: "l-b", State: "pending_import"}); e != nil {
 		t.Fatal(e)
 	}
+	if e := s.SaveWorkCursors(map[string]string{"stack": "a\x00stack-42", "audit:a": id}); e != nil {
+		t.Fatal(e)
+	}
 	if e := s.Close(); e != nil {
 		t.Fatal(e)
 	}
@@ -42,12 +45,16 @@ func TestPersistenceAndMigrations(t *testing.T) {
 	if e := s.Init("family", members); e != nil {
 		t.Fatal(e)
 	}
+	cursors, e := s.WorkCursors()
+	if e != nil || cursors["stack"] != "a\x00stack-42" || cursors["audit:a"] != id {
+		t.Fatalf("work cursors lost on restart: %+v %v", cursors, e)
+	}
 	rep, found, e := s.Replica(id, "b")
 	if e != nil || !found || rep.State != "pending_import" {
 		t.Fatalf("mapping lost on restart: %+v %v", rep, e)
 	}
 	var version int
-	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 7 {
+	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 8 {
 		t.Fatalf("migration version %d %v", version, e)
 	}
 	if _, e := s.DB.Exec(`INSERT INTO asset_replica_files(logical_asset_id,member_id,component_kind,source_path,recipient_path,state) VALUES(?,?,?,?,?,?)`, id, "b", "original", "/fixture/a.jpg", "/fixture/bridge/b.jpg", "ready"); e != nil {

@@ -41,6 +41,37 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.DB.Close() }
 
+func (s *Store) WorkCursors() (map[string]string, error) {
+	rows, err := s.DB.Query(`SELECT kind,cursor FROM work_cursors`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var kind, cursor string
+		if err := rows.Scan(&kind, &cursor); err != nil {
+			return nil, err
+		}
+		out[kind] = cursor
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveWorkCursors(cursors map[string]string) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for kind, cursor := range cursors {
+		if _, err := tx.Exec(`INSERT INTO work_cursors(kind,cursor) VALUES(?,?) ON CONFLICT(kind) DO UPDATE SET cursor=excluded.cursor`, kind, cursor); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 //go:embed migrations/*.sql
 var migrations embed.FS
 
@@ -48,7 +79,7 @@ func (s *Store) Migrate() error {
 	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
-	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql", "migrations/006_album_cover_observations.sql", "migrations/007_stacks.sql"}
+	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql", "migrations/006_album_cover_observations.sql", "migrations/007_stacks.sql", "migrations/008_work_cursors.sql"}
 	var max int
 	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&max); err != nil {
 		return err
@@ -310,6 +341,26 @@ func (s *Store) FindReplicaAsset(member, asset string) (string, bool, error) {
 	return id, err == nil, err
 }
 
+// ReplicaAssetIDs loads a member's reverse mapping once for an album snapshot.
+// Looking up every observed asset separately turns large albums into tens of
+// thousands of serialized SQLite round trips.
+func (s *Store) ReplicaAssetIDs(member string) (map[string]string, error) {
+	rows, err := s.DB.Query(`SELECT immich_asset_id,logical_asset_id FROM asset_replicas WHERE member_id=? AND immich_asset_id IS NOT NULL`, member)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var asset, logical string
+		if err := rows.Scan(&asset, &logical); err != nil {
+			return nil, err
+		}
+		out[asset] = logical
+	}
+	return out, rows.Err()
+}
+
 // ResolveActiveReplica finds the ready asset replica for an authenticated
 // Immich user. A logical asset is resolvable only while it is actively shared;
 // pending-removal replicas must retain Immich's ordinary access behaviour.
@@ -455,6 +506,23 @@ func (s *Store) Replicas() ([]domain.Replica, error) {
 	return out, r.Err()
 }
 
+func (s *Store) ReplicasForMember(member string) (map[string]domain.Replica, error) {
+	rows, err := s.DB.Query(`SELECT logical_asset_id,member_id,COALESCE(immich_asset_id,''),role,COALESCE(filesystem_path,''),COALESCE(external_library_id,''),state,COALESCE(error,'') FROM asset_replicas WHERE member_id=?`, member)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]domain.Replica{}
+	for rows.Next() {
+		var rep domain.Replica
+		if err := rows.Scan(&rep.LogicalID, &rep.MemberID, &rep.AssetID, &rep.Role, &rep.Path, &rep.LibraryID, &rep.State, &rep.Error); err != nil {
+			return nil, err
+		}
+		out[rep.LogicalID] = rep
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ReplicasFor(logical string) ([]domain.Replica, error) {
 	all, err := s.Replicas()
 	if err != nil {
@@ -530,6 +598,55 @@ func (s *Store) SetObservations(album, member string, assets map[string]bool) er
 		}
 	}
 	return tx.Commit()
+}
+
+// UpdateObservations writes only changes since the last persisted snapshot.
+// The caller supplies the known prior state; the decision transaction uses
+// this same delta so unchanged large albums perform no row writes.
+func (s *Store) UpdateObservations(album, member string, before, after map[string]bool) error {
+	if len(before) == len(after) {
+		same := true
+		for id := range before {
+			if !after[id] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return nil
+		}
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := updateObservations(tx, album, member, before, after); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func updateObservations(tx *sql.Tx, album, member string, before, after map[string]bool) error {
+	for id := range before {
+		if !after[id] {
+			if _, err := tx.Exec(`DELETE FROM album_observations WHERE logical_album_id=? AND member_id=? AND immich_asset_id=?`, album, member, id); err != nil {
+				return err
+			}
+		}
+	}
+	for id := range after {
+		if !before[id] {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO album_observations(logical_album_id,member_id,immich_asset_id) VALUES(?,?,?)`, album, member, id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) UpdateObservationsTx(tx *sql.Tx, album, member string, before, after map[string]bool) error {
+	return updateObservations(tx, album, member, before, after)
 }
 func (s *Store) SetInitialized(album string) error {
 	_, err := s.DB.Exec(`UPDATE logical_albums SET initialized=1 WHERE id=?`, album)

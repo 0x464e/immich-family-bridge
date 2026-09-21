@@ -25,6 +25,9 @@ type measuringClient struct {
 	scans             map[string]int
 	metadataRefreshes map[string]int
 	addSizes          []int
+	albumReads        int
+	albumSearches     int
+	albumUpdates      int
 }
 
 type cancelingClient struct {
@@ -91,6 +94,81 @@ func (m *measuringClient) RefreshMetadata(ctx context.Context, member domain.Mem
 	return m.Client.RefreshMetadata(ctx, member, ids)
 }
 
+func (m *measuringClient) GetAlbum(ctx context.Context, member domain.Member, id string) (domain.Album, error) {
+	m.albumReads++
+	return m.Client.GetAlbum(ctx, member, id)
+}
+
+func (m *measuringClient) ListAlbumAssets(ctx context.Context, member domain.Member, id string) ([]domain.Asset, error) {
+	m.albumSearches++
+	return m.Client.ListAlbumAssets(ctx, member, id)
+}
+
+func (m *measuringClient) UpdateAlbum(ctx context.Context, member domain.Member, id, name, desc, cover string) error {
+	m.albumUpdates++
+	return m.Client.UpdateAlbum(ctx, member, id, name, desc, cover)
+}
+
+func TestWorkUsesPersistedDecisionsWithoutAlbumSearch(t *testing.T) {
+	c, db, api, r := setup(t)
+	ctx := context.Background()
+	if _, err := r.EnsureTogether(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Register(ctx, "alice", "trip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Work(ctx); err != nil {
+		t.Fatal(err)
+	}
+	measured := &measuringClient{Client: api, scans: map[string]int{}}
+	worker := New(c, db, measured, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := worker.Work(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if measured.albumReads != 0 || measured.albumSearches != 0 || measured.albumUpdates != 0 {
+		t.Fatalf("steady work touched albums: reads=%d searches=%d updates=%d", measured.albumReads, measured.albumSearches, measured.albumUpdates)
+	}
+	albums, err := db.Albums()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var togetherID string
+	for _, album := range albums {
+		if album.SystemKey == "together" {
+			togetherID = album.ID
+		}
+	}
+	if togetherID == "" {
+		t.Fatal("Together album missing")
+	}
+	reps, err := db.AlbumReplicas(togetherID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.AddAssets(ctx, c.Members[1], reps["bob"], []string{"b1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Work(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := db.FindReplicaAsset("bob", "b1"); err != nil || found {
+		t.Fatalf("work discovered a new origin: found=%v err=%v", found, err)
+	}
+	if err := worker.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := db.FindReplicaAsset("bob", "b1"); err != nil || !found {
+		t.Fatalf("full discovery missed new origin: found=%v err=%v", found, err)
+	}
+	if measured.albumSearches == 0 {
+		t.Fatal("full discovery performed no album search")
+	}
+}
+
 func TestLargeDelayedImportUsesBoundedWorkAndCoalescedScans(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
@@ -131,10 +209,11 @@ func TestLargeDelayedImportUsesBoundedWorkAndCoalescedScans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
-		if err := r.Run(ctx); err != nil {
-			t.Fatal(err)
-		}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Work(ctx); err != nil {
+		t.Fatal(err)
 	}
 	if measured.scans["bob"] != 1 || measured.scans["carol"] != 1 {
 		t.Fatalf("expected one scan per recipient during backlog: %+v", measured.scans)
@@ -155,8 +234,8 @@ func TestLargeDelayedImportUsesBoundedWorkAndCoalescedScans(t *testing.T) {
 	// stale-claim lease so it can exercise the next retry immediately.
 	r.scanLease = 0
 	clock = clock.Add(2 * time.Minute)
-	for i := 0; i < 3; i++ {
-		if err := r.Run(ctx); err != nil {
+	for i := 0; i < 11; i++ {
+		if err := r.Work(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
