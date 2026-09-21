@@ -37,6 +37,7 @@ type Config struct {
 	ForwardAuthTokenEnv string          `yaml:"forward_auth_token_env"`
 	ForwardAuthToken    string          `yaml:"-"`
 	PollInterval        string          `yaml:"poll_interval"`
+	DiscoveryInterval   string          `yaml:"discovery_interval"`
 	TogetherAlbumName   string          `yaml:"together_album_name"`
 	RemoveUnshared      bool            `yaml:"remove_unshared_replicas"`
 	Members             []domain.Member `yaml:"members"`
@@ -68,6 +69,9 @@ func Load(path string) (Config, error) {
 	if c.PollInterval == "" {
 		c.PollInterval = "30s"
 	}
+	if c.DiscoveryInterval == "" {
+		c.DiscoveryInterval = "5m"
+	}
 	if c.TogetherAlbumName == "" {
 		c.TogetherAlbumName = "Together"
 	}
@@ -89,6 +93,13 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Interval() (time.Duration, error) { return time.ParseDuration(c.PollInterval) }
+
+func (c Config) DiscoveryEvery() (time.Duration, error) {
+	if c.DiscoveryInterval == "" {
+		return 5 * time.Minute, nil
+	}
+	return time.ParseDuration(c.DiscoveryInterval)
+}
 
 func (c Config) Validate() error {
 	if !safeID.MatchString(c.FamilyID) {
@@ -149,6 +160,10 @@ func (c Config) Validate() error {
 	d, err := c.Interval()
 	if err != nil || d < time.Second {
 		return errors.New("poll_interval must be at least 1s")
+	}
+	d, err = c.DiscoveryEvery()
+	if err != nil || d < time.Second {
+		return errors.New("discovery_interval must be at least 1s")
 	}
 	if len(c.Members) < 2 {
 		return errors.New("at least two members are required")

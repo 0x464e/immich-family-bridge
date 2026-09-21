@@ -231,6 +231,18 @@ func (c *Client) GetStack(ctx context.Context, m domain.Member, id string) (doma
 	return stack.domain(), err
 }
 
+func (c *Client) ListStacks(ctx context.Context, m domain.Member) ([]domain.Stack, error) {
+	var stacks []stackDTO
+	if err := c.request(ctx, m.Key, "GET", "/stacks", nil, &stacks); err != nil {
+		return nil, err
+	}
+	out := make([]domain.Stack, 0, len(stacks))
+	for _, stack := range stacks {
+		out = append(out, stack.domain())
+	}
+	return out, nil
+}
+
 type albumDTO struct {
 	ID          string  `json:"id"`
 	AlbumName   string  `json:"albumName"`

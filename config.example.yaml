@@ -76,9 +76,15 @@ api_token_env: FAMILYBRIDGE_API_TOKEN
 # api_token_env.
 forward_auth_token_env: FAMILYBRIDGE_FORWARDAUTH_TOKEN
 
-# Time between reconciliation polls, in Go duration syntax (such as 30s or 5m).
+# Time between bounded work passes, measured after the previous pass finishes.
 # Must be at least 1s. The default is 30s when omitted.
 poll_interval: 30s
+
+# Time between complete album discovery passes. Between discoveries, the bridge
+# advances only decisions already stored in SQLite: pending imports, album
+# writes, stack mirroring, and cleanup. Manual POST /api/reconcile still runs a
+# complete discovery immediately. The default is 5m when omitted.
+discovery_interval: 5m
 
 # Delete recipient replicas after removal from Together has removed all
 # registered album references. The default is false when omitted: the bridge

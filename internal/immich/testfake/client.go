@@ -254,6 +254,27 @@ func (f *Client) GetStack(_ context.Context, m domain.Member, id string) (domain
 	}
 	return out, nil
 }
+
+func (f *Client) ListStacks(_ context.Context, m domain.Member) ([]domain.Stack, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return nil, err
+	}
+	out := []domain.Stack{}
+	for id, stack := range f.state.Stacks {
+		if stack.OwnerID != m.UserID {
+			continue
+		}
+		item, err := f.stackDomain(id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
 func (f *Client) GetAlbum(_ context.Context, m domain.Member, id string) (domain.Album, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -15,6 +15,7 @@ type Client interface {
 	GetLibrary(context.Context, domain.Member) (domain.Library, error)
 	GetAsset(context.Context, domain.Member, string) (domain.Asset, error)
 	GetStack(context.Context, domain.Member, string) (domain.Stack, error)
+	ListStacks(context.Context, domain.Member) ([]domain.Stack, error)
 	GetAlbum(context.Context, domain.Member, string) (domain.Album, error)
 	ListAlbums(context.Context, domain.Member) ([]domain.Album, error)
 	ListAlbumAssets(context.Context, domain.Member, string) ([]domain.Asset, error)

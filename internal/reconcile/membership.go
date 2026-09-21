@@ -56,6 +56,7 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 			p.actions = append(p.actions, Action{Kind: "update_album_metadata", MemberID: m.ID})
 		}
 		o.coverID = remote.CoverID
+		o.name, o.description = remote.Name, remote.Description
 		o.previousCoverID, o.coverWasObserved, err = r.DB.AlbumCoverObservation(a.ID, m.ID)
 		if err != nil {
 			return nil, err
@@ -68,15 +69,20 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 		if err != nil {
 			return nil, err
 		}
+		o.prior = prior
+		mappedAssets := r.observedAssetIDs[m.ID]
+		if mappedAssets == nil {
+			mappedAssets, err = r.DB.ReplicaAssetIDs(m.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
 		for _, asset := range assets {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			current[asset.ID] = true
-			lid, known, err := r.DB.FindReplicaAsset(m.ID, asset.ID)
-			if err != nil {
-				return nil, err
-			}
+			lid, known := mappedAssets[asset.ID]
 			if !known {
 				if asset.OwnerID != m.UserID || asset.LibraryID == m.LibraryID {
 					if !preview {
@@ -119,6 +125,12 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 					if err != nil {
 						return nil, err
 					}
+					mappedAssets[asset.ID] = lid
+				}
+			}
+			if !preview && asset.OwnerID == m.UserID && asset.LibraryID != m.LibraryID && asset.StackID != "" {
+				if err := r.rememberSourceStack(m.ID, asset); err != nil {
+					return nil, err
 				}
 			}
 			p.assetLogical[m.ID+"\x00"+asset.ID] = lid
@@ -143,10 +155,7 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 				if err != nil {
 					return nil, fmt.Errorf("check missing album asset: %w", err)
 				}
-				lid, known, err := r.DB.FindReplicaAsset(m.ID, old)
-				if err != nil {
-					return nil, err
-				}
+				lid, known := mappedAssets[old]
 				if known {
 					p.removes[lid] = true
 				}
@@ -281,20 +290,27 @@ func (r *Reconciler) persistPlans(plans []*albumPlan) error {
 			}
 		}
 		for _, o := range p.observations {
-			if _, err = tx.Exec("DELETE FROM album_observations WHERE logical_album_id=? AND member_id=?", p.album.ID, o.member.ID); err != nil {
+			if err := r.DB.UpdateObservationsTx(tx, p.album.ID, o.member.ID, o.prior, o.assets); err != nil {
 				return err
-			}
-			for id := range o.assets {
-				if _, err = tx.Exec("INSERT INTO album_observations(logical_album_id,member_id,immich_asset_id) VALUES(?,?,?)", p.album.ID, o.member.ID, id); err != nil {
-					return err
-				}
 			}
 		}
 		if _, err = tx.Exec("UPDATE logical_albums SET initialized=1 WHERE id=?", p.album.ID); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, p := range plans {
+		for i := range p.observations {
+			o := &p.observations[i]
+			o.persisted = make(map[string]bool, len(o.assets))
+			for id := range o.assets {
+				o.persisted[id] = true
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) previewPlans(ctx context.Context, albums []domain.LogicalAlbum) ([]Action, error) {

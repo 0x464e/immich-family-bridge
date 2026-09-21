@@ -60,8 +60,14 @@ func main() {
 	}
 	log.Info("Together album ready for reconciliation", "logical_album_id", togetherID, "album_name", c.TogetherAlbumName)
 	interval, _ := c.Interval()
+	discoveryEvery, _ := c.DiscoveryEvery()
+	lastDiscovery := time.Time{}
+	forceDiscovery := true
 	runCycle := func() {
 		if c.DryRun {
+			if !lastDiscovery.IsZero() && time.Since(lastDiscovery) < discoveryEvery {
+				return
+			}
 			actions, err := r.DryRun(ctx)
 			if err != nil {
 				if ctx.Err() == nil {
@@ -70,9 +76,23 @@ func main() {
 				return
 			}
 			logDryRunActions(log, actions)
+			lastDiscovery = time.Now()
 			return
 		}
-		if err := r.Run(ctx); err != nil && ctx.Err() == nil {
+		full := forceDiscovery || lastDiscovery.IsZero() || time.Since(lastDiscovery) >= discoveryEvery
+		var err error
+		if full {
+			err = r.Run(ctx)
+		} else {
+			err = r.Work(ctx)
+		}
+		if full && (err == nil || errors.Is(err, reconcile.ErrPostwork)) {
+			lastDiscovery = time.Now()
+			forceDiscovery = false
+		} else if err != nil && !errors.Is(err, reconcile.ErrPostwork) {
+			forceDiscovery = true
+		}
+		if err != nil && ctx.Err() == nil {
 			log.Error("reconciliation cycle incomplete", "error", err)
 		}
 	}
@@ -110,17 +130,17 @@ func main() {
 }
 
 func runPolling(ctx context.Context, interval time.Duration, cycle func()) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	if ctx.Err() != nil {
 		return
 	}
 	cycle()
 	for {
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			if ctx.Err() != nil {
 				return
 			}

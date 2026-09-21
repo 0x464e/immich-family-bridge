@@ -36,7 +36,7 @@ func TestPinnedOpenAPISubset(t *testing.T) {
 	if spec.Info.Version != "3.2.2" {
 		t.Fatalf("spec version %s", spec.Info.Version)
 	}
-	for path, method := range map[string]string{"/users/me": "get", "/assets": "delete", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post", "/stacks": "post", "/stacks/{id}": "get"} {
+	for path, method := range map[string]string{"/users/me": "get", "/assets": "delete", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post", "/stacks": "get", "/stacks/{id}": "get"} {
 		if spec.Paths[path][method] == nil {
 			t.Fatalf("missing %s %s", method, path)
 		}
@@ -76,6 +76,20 @@ func TestSessionUserReplaysOnlyBrowserCookie(t *testing.T) {
 	c.AdminKey = "admin"
 	if got, err := c.SessionUser(context.Background(), "immich_access_token=session"); err != nil || got != "user-id" {
 		t.Fatalf("SessionUser = %q, %v", got, err)
+	}
+}
+
+func TestListStacksReadsOwnedStackMembership(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/stacks" || r.Header.Get("x-api-key") != "member-key" {
+			t.Fatalf("unexpected stack request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`[{"id":"stack-1","primaryAssetId":"jpeg-1","assets":[{"id":"jpeg-1","ownerId":"user-1","libraryId":null},{"id":"dng-1","ownerId":"user-1","libraryId":null}]}]`))
+	}))
+	defer server.Close()
+	stacks, err := New(server.URL+"/api").ListStacks(context.Background(), domain.Member{Key: "member-key"})
+	if err != nil || len(stacks) != 1 || stacks[0].ID != "stack-1" || stacks[0].PrimaryAssetID != "jpeg-1" || len(stacks[0].Assets) != 2 {
+		t.Fatalf("ListStacks = %+v, %v", stacks, err)
 	}
 }
 

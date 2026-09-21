@@ -27,6 +27,15 @@ type Reconciler struct {
 	Log                    *slog.Logger
 	mu                     sync.Mutex
 	batchCursor            map[string]string
+	prepareRemaining       map[string]int
+	lookupRemaining        map[string]int
+	attemptedPrepare       map[string]bool
+	attemptedLookup        map[string]bool
+	auditFailed            map[string]bool
+	cycleTogetherID        string
+	cycleTogetherAssets    map[string]map[string]bool
+	stackCache             map[string]domain.Stack
+	observedAssetIDs       map[string]map[string]string
 	lastScanAt             map[string]time.Time
 	scanInterval           time.Duration
 	scanLease              time.Duration
@@ -36,12 +45,14 @@ type Reconciler struct {
 }
 
 var ErrDryRunMode = errors.New("dry-run mode enabled; proposed actions are reported in the service logs")
+var ErrPostwork = errors.New("reconciliation postwork incomplete")
 var errPendingImport = errors.New("waiting for Immich library import")
 
 const (
 	prepareBatchSize = 500
 	lookupBatchSize  = 500
-	auditBatchSize   = 200
+	auditBatchSize   = 50
+	stackBatchSize   = 50
 	albumBatchSize   = 100
 	removalBatchSize = 100
 )
@@ -347,6 +358,11 @@ type observed struct {
 	member           domain.Member
 	albumID          string
 	assets           map[string]bool
+	prior            map[string]bool
+	persisted        map[string]bool
+	name             string
+	description      string
+	fromSnapshot     bool
 	coverID          string
 	previousCoverID  string
 	coverWasObserved bool
@@ -358,9 +374,21 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	started := r.now()
+	if err := r.startCycle(prepareBatchSize, lookupBatchSize); err != nil {
+		return err
+	}
 	albums, err := r.DB.Albums()
 	if err != nil {
 		return err
+	}
+	r.observedAssetIDs = map[string]map[string]string{}
+	for _, member := range r.C.Members {
+		mapped, err := r.DB.ReplicaAssetIDs(member.ID)
+		if err != nil {
+			return err
+		}
+		r.observedAssetIDs[member.ID] = mapped
 	}
 	// Observe every album before changing memberships or deleting replicas. A
 	// failed read must never turn an incomplete view into an unsharing decision.
@@ -378,6 +406,105 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	resolveTogether(plans)
 	if err := r.persistPlans(plans); err != nil {
 		return err
+	}
+	if err := r.discoverSourceStacks(ctx); err != nil {
+		return err
+	}
+	if err := r.auditReadyReplicas(ctx, plans, auditBatchSize); err != nil {
+		return err
+	}
+	return r.applyPlans(ctx, plans, started, "discovery")
+}
+
+// Work continues only decisions already persisted by a successful full
+// observation. It makes no membership decisions and performs no album search.
+// This lets a large import advance without repeatedly crawling every album.
+func (r *Reconciler) Work(ctx context.Context) error {
+	if r.C.DryRun {
+		return ErrDryRunMode
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	started := r.now()
+	if err := r.startCycle(100, 50); err != nil {
+		return err
+	}
+	albums, err := r.DB.Albums()
+	if err != nil {
+		return err
+	}
+	plans := make([]*albumPlan, 0, len(albums))
+	for _, a := range albums {
+		if !a.Initialized {
+			continue
+		}
+		desired, err := r.DB.Memberships(a.ID)
+		if err != nil {
+			return err
+		}
+		reps, err := r.DB.AlbumReplicas(a.ID)
+		if err != nil {
+			return err
+		}
+		plan := &albumPlan{album: a, desired: desired}
+		for _, member := range r.C.Members {
+			albumID := reps[member.ID]
+			if albumID == "" {
+				return fmt.Errorf("missing album replica for %s", member.ID)
+			}
+			assets, err := r.DB.Observations(a.ID, member.ID)
+			if err != nil {
+				return err
+			}
+			cover, _, err := r.DB.AlbumCoverObservation(a.ID, member.ID)
+			if err != nil {
+				return err
+			}
+			persisted := make(map[string]bool, len(assets))
+			for id := range assets {
+				persisted[id] = true
+			}
+			plan.observations = append(plan.observations, observed{member: member, albumID: albumID, assets: assets, persisted: persisted, name: a.Name, description: a.Description, coverID: cover, fromSnapshot: true})
+		}
+		plans = append(plans, plan)
+	}
+	sort.SliceStable(plans, func(i, j int) bool {
+		return plans[i].album.SystemKey == "together" && plans[j].album.SystemKey != "together"
+	})
+	if err := r.auditReadyReplicas(ctx, plans, auditBatchSize/2); err != nil {
+		return err
+	}
+	return r.applyPlans(ctx, plans, started, "work")
+}
+
+func (r *Reconciler) startCycle(prepareLimit, lookupLimit int) error {
+	cursors, err := r.DB.WorkCursors()
+	if err != nil {
+		return err
+	}
+	r.batchCursor = cursors
+	r.stackCache = nil
+	r.observedAssetIDs = nil
+	r.prepareRemaining = map[string]int{}
+	r.lookupRemaining = map[string]int{}
+	r.attemptedPrepare = map[string]bool{}
+	r.attemptedLookup = map[string]bool{}
+	r.auditFailed = map[string]bool{}
+	for _, member := range r.C.Members {
+		r.prepareRemaining[member.ID] = prepareLimit
+		r.lookupRemaining[member.ID] = lookupLimit
+	}
+	return nil
+}
+
+func (r *Reconciler) applyPlans(ctx context.Context, plans []*albumPlan, started time.Time, mode string) error {
+	r.cycleTogetherID = ""
+	r.cycleTogetherAssets = map[string]map[string]bool{}
+	for _, plan := range plans {
+		if plan.album.SystemKey == "together" {
+			r.cycleTogetherID = plan.album.ID
+			break
+		}
 	}
 	var errs []error
 	for _, plan := range plans {
@@ -413,7 +540,55 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			}
 		}
 	}
-	return errors.Join(errs...)
+	if e := r.DB.SaveWorkCursors(r.batchCursor); e != nil {
+		errs = append(errs, e)
+	}
+	r.Log.Info("reconciliation cycle complete", "mode", mode, "duration", r.now().Sub(started), "albums", len(plans), "errors", len(errs))
+	if len(errs) != 0 {
+		return fmt.Errorf("%w: %w", ErrPostwork, errors.Join(errs...))
+	}
+	return nil
+}
+
+// Audit each ready logical asset at most once per member and cycle, even when
+// it belongs to many albums. A rotating cursor makes the slow correctness
+// sweep bounded without permanently starving the tail of a large library.
+func (r *Reconciler) auditReadyReplicas(ctx context.Context, plans []*albumPlan, limit int) error {
+	desired := map[string]bool{}
+	for _, plan := range plans {
+		for id := range plan.desired {
+			desired[id] = true
+		}
+	}
+	for _, member := range r.C.Members {
+		reps, err := r.DB.ReplicasForMember(member.ID)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(desired))
+		for id := range desired {
+			if rep, ok := reps[id]; ok && rep.State == "ready" && rep.AssetID != "" {
+				ids = append(ids, id)
+			}
+		}
+		sort.Strings(ids)
+		for _, id := range r.batchAfter("audit:"+member.ID, ids, limit) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if _, err := r.ensureReplica(ctx, id, member); err != nil {
+				if canceled := ctx.Err(); canceled != nil {
+					return canceled
+				}
+				if errors.Is(err, errPendingImport) {
+					continue
+				}
+				r.auditFailed[member.ID+"\x00"+id] = true
+				r.Log.Warn("asset replica audit failed", "logical_asset_id", id, "member_id", member.ID, "error", err)
+			}
+		}
+	}
+	return nil
 }
 
 // rememberSourceStack records stack associations observed while auditing a
@@ -426,13 +601,73 @@ func (r *Reconciler) rememberSourceStack(memberID string, asset domain.Asset) er
 	return r.DB.UpsertSourceStack(domain.SourceStack{SourceMember: memberID, SourceStack: asset.StackID, PrimaryAsset: asset.StackPrimaryID})
 }
 
+// Album search does not include stack metadata in Immich 3.2. A single stack
+// listing per member is therefore needed to discover retroactive changes
+// without probing every source asset individually. Only stacks containing a
+// mapped origin are considered; recipient stacks must never become sources.
+func (r *Reconciler) discoverSourceStacks(ctx context.Context) error {
+	r.stackCache = map[string]domain.Stack{}
+	for _, member := range r.C.Members {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		stacks, err := r.API.ListStacks(ctx, member)
+		if err != nil {
+			r.Log.Warn("source stack listing failed", "member_id", member.ID, "error", err)
+			continue
+		}
+		replicas, err := r.DB.ReplicasForMember(member.ID)
+		if err != nil {
+			return err
+		}
+		origins := map[string]bool{}
+		for _, replica := range replicas {
+			if replica.Role == "origin" && replica.AssetID != "" {
+				origins[replica.AssetID] = true
+			}
+		}
+		for _, stack := range stacks {
+			if stack.ID == "" || stack.PrimaryAssetID == "" || len(stack.Assets) < 2 {
+				continue
+			}
+			owned := false
+			valid := true
+			for _, asset := range stack.Assets {
+				if asset.OwnerID != member.UserID || asset.LibraryID == member.LibraryID {
+					valid = false
+					break
+				}
+				owned = owned || origins[asset.ID]
+			}
+			if !valid || !owned {
+				continue
+			}
+			if err := r.DB.UpsertSourceStack(domain.SourceStack{SourceMember: member.ID, SourceStack: stack.ID, PrimaryAsset: stack.PrimaryAssetID}); err != nil {
+				return err
+			}
+			r.stackCache[member.ID+"\x00"+stack.ID] = stack
+		}
+	}
+	return nil
+}
+
 func (r *Reconciler) reconcileStacks(ctx context.Context) error {
 	sources, err := r.DB.SourceStacks()
 	if err != nil {
 		return err
 	}
-	var errs []error
+	byKey := make(map[string]domain.SourceStack, len(sources))
+	keys := make([]string, 0, len(sources))
 	for _, source := range sources {
+		key := source.SourceMember + "\x00" + source.SourceStack
+		keys = append(keys, key)
+		byKey[key] = source
+	}
+	// SourceStacks is already ordered by these two columns.
+	selected := r.batchAfter("stack", keys, stackBatchSize)
+	var errs []error
+	for _, key := range selected {
+		source := byKey[key]
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -441,7 +676,11 @@ func (r *Reconciler) reconcileStacks(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("stack %s source member missing", source.SourceStack))
 			continue
 		}
-		stack, err := r.API.GetStack(ctx, member, source.SourceStack)
+		stack, cached := r.stackCache[key]
+		var err error
+		if !cached {
+			stack, err = r.API.GetStack(ctx, member, source.SourceStack)
+		}
 		if err != nil {
 			// Immich 3.2 returns HTTP 400 for a deleted stack. Do not treat an
 			// arbitrary stack-read failure as deletion: independently confirm
@@ -479,6 +718,9 @@ func (r *Reconciler) reconcileStacks(ctx context.Context) error {
 				errs = append(errs, e)
 			}
 		}
+	}
+	if len(sources) > stackBatchSize {
+		r.Log.Info("stack sweep progress", "processed", len(selected), "known", len(sources))
 	}
 	return errors.Join(errs...)
 }
@@ -797,19 +1039,16 @@ func (r *Reconciler) applyAlbum(ctx context.Context, plan *albumPlan) error {
 	}
 	for _, o := range obs {
 		var togetherAssets map[string]bool
-		if a.SystemKey != "together" {
-			albums, err := r.DB.Albums()
-			if err != nil {
-				return err
-			}
-			for _, album := range albums {
-				if album.SystemKey == "together" {
-					togetherAssets, err = r.DB.Observations(album.ID, o.member.ID)
-					if err != nil {
-						return err
-					}
-					break
+		if a.SystemKey != "together" && r.cycleTogetherID != "" {
+			var ok bool
+			togetherAssets, ok = r.cycleTogetherAssets[o.member.ID]
+			if !ok {
+				var err error
+				togetherAssets, err = r.DB.Observations(r.cycleTogetherID, o.member.ID)
+				if err != nil {
+					return err
 				}
+				r.cycleTogetherAssets[o.member.ID] = togetherAssets
 			}
 		}
 		if err := r.reconcileMemberAssets(ctx, a.ID, o, desired, togetherAssets); err != nil {
@@ -825,21 +1064,26 @@ func (r *Reconciler) applyAlbum(ctx context.Context, plan *albumPlan) error {
 				coverID = cover.AssetID
 			}
 		}
-		if err := r.API.UpdateAlbum(ctx, o.member, o.albumID, a.Name, a.Description, coverID); err != nil {
-			return err
+		if !o.fromSnapshot {
+			if o.name != a.Name || o.description != a.Description || (coverID != "" && coverID != o.coverID) {
+				if err := r.API.UpdateAlbum(ctx, o.member, o.albumID, a.Name, a.Description, coverID); err != nil {
+					return err
+				}
+			}
+			observedCover := o.coverID
+			if coverID != "" {
+				observedCover = coverID
+			}
+			if err := r.DB.SetAlbumCoverObservation(a.ID, o.member.ID, observedCover); err != nil {
+				return err
+			}
 		}
-		observedCover := o.coverID
-		if coverID != "" {
-			observedCover = coverID
-		}
-		if err := r.DB.SetAlbumCoverObservation(a.ID, o.member.ID, observedCover); err != nil {
+		mappedAssets, err := r.DB.ReplicaAssetIDs(o.member.ID)
+		if err != nil {
 			return err
 		}
 		for assetID := range o.assets {
-			lid, known, err := r.DB.FindReplicaAsset(o.member.ID, assetID)
-			if err != nil {
-				return err
-			}
+			lid, known := mappedAssets[assetID]
 			if known && !desired[lid] {
 				if err := r.API.RemoveAssets(ctx, o.member, o.albumID, []string{assetID}); err != nil {
 					return err
@@ -847,7 +1091,7 @@ func (r *Reconciler) applyAlbum(ctx context.Context, plan *albumPlan) error {
 				delete(o.assets, assetID)
 			}
 		}
-		if err := r.DB.SetObservations(a.ID, o.member.ID, o.assets); err != nil {
+		if err := r.DB.UpdateObservations(a.ID, o.member.ID, o.persisted, o.assets); err != nil {
 			return err
 		}
 	}
@@ -858,7 +1102,7 @@ func (r *Reconciler) applyAlbum(ctx context.Context, plan *albumPlan) error {
 // ready audits keep making progress even when there are more than one cycle's
 // worth of assets. The cursor only affects scheduling; replica state is in SQLite.
 func (r *Reconciler) batchAfter(key string, ids []string, limit int) []string {
-	if len(ids) == 0 {
+	if len(ids) == 0 || limit <= 0 {
 		return nil
 	}
 	start := sort.Search(len(ids), func(i int) bool { return ids[i] > r.batchCursor[key] })
@@ -875,13 +1119,16 @@ func (r *Reconciler) batchAfter(key string, ids []string, limit int) []string {
 }
 
 func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, o observed, desired map[string]bool, togetherAssets map[string]bool) error {
+	replicas, err := r.DB.ReplicasForMember(o.member.ID)
+	if err != nil {
+		return err
+	}
 	ids := make([]string, 0, len(desired))
 	for id := range desired {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	ready := make(map[string]domain.Replica, len(ids))
-	readyIDs := []string{}
 	needsPrepare := []string{}
 	pending := map[string]bool{}
 	unsupported := 0
@@ -889,14 +1136,12 @@ func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rep, found, err := r.DB.Replica(id, o.member.ID)
-		if err != nil {
-			return err
-		}
+		rep, found := replicas[id]
 		switch {
+		case r.auditFailed[o.member.ID+"\x00"+id]:
+			continue
 		case found && rep.State == "ready" && rep.AssetID != "":
 			ready[id] = rep
-			readyIDs = append(readyIDs, id)
 		case found && rep.State == "pending_import" && rep.Path != "":
 			pending[id] = true
 		case found && rep.State == "unsupported":
@@ -909,13 +1154,19 @@ func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, 
 			needsPrepare = append(needsPrepare, id)
 		}
 	}
-	key := albumID + ":" + o.member.ID
-	toPrepare := r.batchAfter("prepare:"+key, needsPrepare, prepareBatchSize)
+	toPrepare := r.batchAfter("prepare:"+o.member.ID, needsPrepare, r.prepareRemaining[o.member.ID])
 	for _, id := range toPrepare {
+		workKey := o.member.ID + "\x00" + id
+		if r.attemptedPrepare[workKey] {
+			continue
+		}
+		r.attemptedPrepare[workKey] = true
+		r.prepareRemaining[o.member.ID]--
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		rep, err := r.ensureReplica(ctx, id, o.member)
+		replicas[id] = rep
 		if errors.Is(err, errPendingImport) {
 			pending[id] = true
 			continue
@@ -930,26 +1181,6 @@ func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, 
 		if rep.State == "ready" && rep.AssetID != "" {
 			ready[id] = rep
 		}
-	}
-	for _, id := range r.batchAfter("audit:"+key, readyIDs, auditBatchSize) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		rep, err := r.ensureReplica(ctx, id, o.member)
-		if errors.Is(err, errPendingImport) {
-			delete(ready, id)
-			pending[id] = true
-			continue
-		}
-		if err != nil {
-			if canceled := ctx.Err(); canceled != nil {
-				return canceled
-			}
-			delete(ready, id)
-			r.Log.Warn("asset replica audit failed", "logical_asset_id", id, "member_id", o.member.ID, "error", err)
-			continue
-		}
-		ready[id] = rep
 	}
 	scanned := false
 	if len(pending) > 0 {
@@ -969,18 +1200,22 @@ func (r *Reconciler) reconcileMemberAssets(ctx context.Context, albumID string, 
 	}
 	sort.Strings(pendingIDs)
 	imported := 0
-	for _, id := range r.batchAfter("lookup:"+key, pendingIDs, lookupBatchSize) {
+	for _, id := range r.batchAfter("lookup:"+o.member.ID, pendingIDs, r.lookupRemaining[o.member.ID]) {
+		workKey := o.member.ID + "\x00" + id
+		if r.attemptedLookup[workKey] {
+			continue
+		}
+		r.attemptedLookup[workKey] = true
+		r.lookupRemaining[o.member.ID]--
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rep, found, err := r.DB.Replica(id, o.member.ID)
-		if err != nil {
-			return err
-		}
+		rep, found := replicas[id]
 		if !found {
 			return fmt.Errorf("pending replica mapping disappeared for %s", id)
 		}
 		rep, err = r.resolvePendingImport(ctx, rep, o.member)
+		replicas[id] = rep
 		if errors.Is(err, errPendingImport) {
 			continue
 		}
