@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/0x464e/immich-family-bridge/compare/v0.2.0...v0.3.0) (2026-09-21)
+
+
+### Features
+
+* mirror Immich stacks ([acf1419](https://github.com/0x464e/immich-family-bridge/commit/acf1419be5120ae351d12192e5b7d0e838782971))
+
 ## [0.2.0](https://github.com/0x464e/immich-family-bridge/compare/v0.1.0...v0.2.0) (2026-09-19)
 
 
