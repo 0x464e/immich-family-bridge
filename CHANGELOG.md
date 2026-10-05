@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/0x464e/immich-family-bridge/compare/v0.3.1...v0.4.0) (2026-10-05)
+
+
+### Features
+
+* add reversible mirror album deletion and restoration ([fa51765](https://github.com/0x464e/immich-family-bridge/commit/fa51765458b460dd8a1a9571ca4fa077b8a96443))
+* register mirrored albums through Together account sharing ([7b2fff6](https://github.com/0x464e/immich-family-bridge/commit/7b2fff6b15582ba01c3c3d613e36c516fe392220))
+
 ## [0.3.1](https://github.com/0x464e/immich-family-bridge/compare/v0.3.0...v0.3.1) (2026-09-21)
 
 
