@@ -106,16 +106,77 @@ shared with this account. Existing registrations are backfilled on the first
 active discovery after enabling the setting; new API registrations are marked
 immediately. Missing shares are added as viewer without changing other users or
 an existing marker role. A failed sharing request is reported and retried from
-the saved mapping without duplicating the registration.
-
-Registration is durable. Removing the Together account from a registered album
-does **not** stop mirroring or remove any media: the next full discovery restores
-the share. Disabling `together_user_id` stops discovery/share maintenance but
-keeps existing registrations and shares. There is no unregister workflow yet.
+the saved mapping without duplicating the registration. Once a marker share is
+confirmed, removing it from any member's copy instead requests unmirroring, as
+described below. Legacy albums with no confirmed share are still backfilled;
+changing the configured marker user also starts a fresh confirmation baseline.
+Disabling `together_user_id` stops Share-dialog discovery/unmirror detection but
+keeps existing registrations and shares; explicit API unmirroring still works.
 
 In dry-run mode, marked albums are registered only in local SQLite, matching
 manual dry-run registration. Logs preview missing replicas and marker shares;
 no Immich sharing, albums, media, or memberships are changed until activation.
+
+### Unmirror and restore albums
+
+**Removing the Together account from any member's mirrored album deletes that
+album from every member, including the original owner's album.** The next full
+discovery performs this operation; `POST /api/reconcile` runs it immediately.
+This also applies to pre-existing albums explicitly attached as replicas.
+Alternatively, use `DELETE /api/albums/{logicalAlbumId}`. Member API keys must
+have `album.delete` (now checked at startup). Unmirroring does not require
+`asset.delete` and never deletes photos, videos, original files, or recipient
+hardlinks. Existing catch-all Together membership remains intact. Remove photos
+from the catch-all Together album separately to stop sharing those photos.
+
+The catch-all Together album is protected by its stored system identity, not
+its editable name. API unmirror/restore requests for it return HTTP 409. Removing
+its marker share merely causes the bridge to restore that share; it never
+requests album deletion.
+
+Before the first album deletion, the bridge saves a recovery record in SQLite:
+logical album ID, name, description, deletion time/initiator, original replica
+IDs, and each replica's asset IDs and cover. No media bytes are copied. The IDs
+take roughly 40 bytes per asset per member in JSON, plus metadata/SQLite overhead
+(about 120 KB for 1,000 photos across three members). Keep the bridge's state
+volume backed up: deleting that database would also lose these records.
+
+`GET /api/albums/deleted` lists recovery records and their `deleting`, `deleted`,
+or `restoring` state; pending/deleted albums no longer appear in `GET /api/albums`
+or album-link translation. Incomplete operations resume during subsequent
+discovery/work passes or after restart. An incomplete snapshot or failed album
+read is an error, never an unmirror signal or permission to delete.
+
+Restore with `POST /api/albums/{logicalAlbumId}/restore`. This creates new Immich
+albums under the same logical ID, reinstates their saved metadata and still
+existing asset IDs, and marks them mirrored again. Immich album IDs/old album
+URLs necessarily change. Missing asset IDs (including a missing cover) are
+skipped and logged; other API failures retain the record for retry rather than
+silently skipping assets. Normal mirroring resumes after restoration. The
+recovery record is removed only after every member's album has been restored.
+Ad-hoc shares with other users and public links are not restored.
+Repeated delete requests while deleted and repeated restore requests while
+active are idempotent. Restore is rejected until a pending deletion finishes.
+
+For example, with the usual bearer token:
+
+~~~sh
+curl --fail-with-body -sS -X DELETE \
+  -H "Authorization: Bearer $FAMILYBRIDGE_API_TOKEN" \
+  "http://127.0.0.1:6773/api/albums/<logical-album-id>"
+
+curl --fail-with-body -sS \
+  -H "Authorization: Bearer $FAMILYBRIDGE_API_TOKEN" \
+  http://127.0.0.1:6773/api/albums/deleted
+
+curl --fail-with-body -sS -X POST \
+  -H "Authorization: Bearer $FAMILYBRIDGE_API_TOKEN" \
+  "http://127.0.0.1:6773/api/albums/<logical-album-id>/restore"
+~~~
+
+Dry-run rejects both destructive/restoration API operations with HTTP 409.
+Detected Share-dialog unmirroring is previewed without archiving or deleting
+anything. Pending operations saved during active mode remain paused in dry-run.
 
 ## Transparent media and mirror-album links
 
@@ -153,6 +214,9 @@ curl --fail-with-body -sS -X POST \
 | `GET /api/assets/{logicalAssetId}` | One logical asset, its per-member replicas, and media component states |
 | `GET /api/filesystem` | Recipient file existence, inode equality, and link details |
 | `POST /api/albums` | Register an Immich album and optional existing replicas |
+| `GET /api/albums/deleted` | List recovery records, including pending operations |
+| `DELETE /api/albums/{logicalAlbumId}` | Archive and delete all album copies; retain photos and Together |
+| `POST /api/albums/{logicalAlbumId}/restore` | Restore deleted album copies with surviving asset IDs |
 | `PATCH /api/albums/{logicalAlbumId}` | Set `name`, `description`, and optional `coverLogicalAssetId` |
 | `POST /api/reconcile` | Run one reconciliation cycle in active mode; HTTP 409 in dry-run mode |
 
@@ -168,7 +232,7 @@ After a process crash or host reboot, the container's restart policy starts the 
 
 - Ordinary images and videos can include one Immich-associated `.xmp` sidecar. The bridge does not guess sidecars from filenames: the source asset's `/asset-files` response must identify it. JSON sidecars and other sidecar formats are unsupported. Source stacks are mirrored after every member has a ready replica for every stack member; the source primary asset remains primary. A stack with an unshared or pending member stays unstacked for recipients. Live Photos and visual edits remain unsupported. Ordinary JPEGs and XMP sidecars have live end-to-end validation; videos still need a live trial.
 - Recipient XMP files are hardlinks to the source XMP. They are shared files rather than per-user metadata copies. Keep the recipient mount read-only in Immich. Source-side XMP changes are detected during bounded replica audits and queued for recipient metadata refresh; detection latency grows with the number of ready assets.
-- Removing an asset from a secondary mirror album leaves it shared through Together. Removing it from Together removes it from all registered mirror albums, and recipient replicas enter `pending_removal`. By default their Immich assets and hardlinks remain. With `remove_unshared_replicas: true`, verified cleanup begins on the next poll, handles up to 100 replicas per cycle, and resumes from SQLite after interruption. Deleting an entire album still produces a visible reconciliation error.
+- Removing an asset from a secondary mirror album leaves it shared through Together. Removing it from Together removes it from all registered mirror albums, and recipient replicas enter `pending_removal`. By default their Immich assets and hardlinks remain. With `remove_unshared_replicas: true`, verified cleanup begins on the next poll, handles up to 100 replicas per cycle, and resumes from SQLite after interruption. Directly deleting an album in Immich, instead of unsharing its Together marker or using the bridge's unmirror API, still produces a visible reconciliation error.
 - The bridge does not create public shared links. It does not mirror favorites, people, edits, or other personal Immich metadata.
 - If Immich moves a managed original to a storage-template path, the bridge accepts the new path only after matching the old source or existing recipient links by inode. A move that changes the inode needs manual investigation. Recipient paths remain stable.
 - The service supports one family per SQLite database and at least two configured members. It has no workflow yet for removing members or changing their identities.

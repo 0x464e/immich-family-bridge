@@ -140,3 +140,51 @@ test-account identities and container mounts before making writes. Unit tests
 add sharing-failure retry, preserved participant roles, disabled-feature
 behavior, permission/user checks, and read-only preview coverage. The full Go
 test suite, `go vet`, and the race-enabled test suite passed.
+
+## Reversible album unmirroring (2026-10-05)
+
+The subsequent unmirror feature supersedes the ordinary-album marker-repair
+behavior described above. On the same localhost-only disposable Immich 3.2.2
+and dev bridge, removing the Together viewer from a recipient's album triggered
+scheduled deletion of all three copies, including the original owner's album.
+The bridge saved the recovery record before deletion. Every member's Together
+asset set and every tested original/recipient file inode stayed unchanged,
+even with `remove_unshared_replicas: true` in the test configuration.
+
+The record survived a real dev-container restart. We inserted one nonexistent
+UUID into this verified disposable SQLite recovery record to simulate a photo
+disappearing while the album was deleted, without deleting any actual media.
+API restoration skipped and logged that UUID, recreated all three albums with
+new Immich IDs and their exact surviving asset sets, reinstated Together viewer
+shares, and removed the completed recovery record. The same logical album ID
+then completed a second API deletion/restoration cycle. Repeated operations did
+not duplicate albums. The serialized recovery record for one photo across three
+members measured 981 bytes; it contained no media data.
+
+API delete/restore attempts on the catch-all Together album returned HTTP 409.
+Removing its viewer through Immich only repaired the viewer share: the album
+IDs and all asset sets stayed intact. A scoped member key with `album.delete`
+and no `asset.delete` deleted a disposable empty album successfully, while a
+key without `album.delete` received HTTP 403. Temporary scoped keys were revoked.
+
+A separate live dry-run restart rejected delete/restore API requests, logged
+the proposed Share-dialog unmirror, and left both remote albums and local
+deletion records unchanged. Activation subsequently performed the pending UI
+intent, and API restoration completed against the final build. The bridge was
+left active with its test fixture restored; SQLite's integrity check passed.
+
+Both `scripts/test-album-sharing.py` and `scripts/test-album-unmirroring.py`
+passed against the rebuilt disposable bridge. The latter checks test identities
+and mounts before writes and makes no asset/file DELETE calls. Unit tests cover
+failed snapshot/album reads before deletion, lost delete/create responses,
+restart/reopen recovery, refusal to restore an incomplete deletion, missing
+asset versus transient API errors, actual restored membership verification,
+empty albums, edits not yet reconciled, dry-run preview, stale registration
+suppression, and system-album protection even with a corrupted recovery target.
+The full Go suite, `go vet`, and race-enabled suite passed.
+
+One early new-upload audit logged an existing storage-template move/inode
+verification warning; the subsequent ready-state, exact-membership, and hardlink
+checks passed. Missing-asset restoration logged its expected warning. These
+tests validate the tested album lifecycle, not arbitrary concurrent Immich edits
+or every server/storage failure. Production was not accessed or changed.

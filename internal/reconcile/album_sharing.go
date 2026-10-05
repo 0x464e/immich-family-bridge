@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,24 +18,36 @@ func (r *Reconciler) sharedWithTogether(album domain.Album) bool {
 	return false
 }
 
-func (r *Reconciler) ensureTogetherShare(ctx context.Context, member domain.Member, album domain.Album) error {
-	if r.C.TogetherUserID == "" || r.C.DryRun || r.sharedWithTogether(album) {
+func (r *Reconciler) ensureTogetherShare(ctx context.Context, logicalID string, member domain.Member, album domain.Album) error {
+	if r.C.TogetherUserID == "" || r.C.DryRun {
 		return nil
 	}
 	if album.OwnerID != member.UserID {
 		return fmt.Errorf("cannot share album %s: member %s is not its owner", album.ID, member.ID)
 	}
-	if err := r.API.AddAlbumUser(ctx, member, album.ID, r.C.TogetherUserID); err != nil {
-		return fmt.Errorf("share album %s with Together user: %w", album.ID, err)
+	if !r.sharedWithTogether(album) {
+		logical, err := r.DB.Album(logicalID)
+		if err != nil {
+			return err
+		}
+		confirmed, err := r.DB.ObservedAlbumMarker(logicalID, member.ID, strings.ToLower(r.C.TogetherUserID))
+		if err != nil {
+			return err
+		}
+		if confirmed && logical.SystemKey == "" {
+			return errors.New("Together share was removed; album will be unmirrored on discovery")
+		}
+		if err := r.API.AddAlbumUser(ctx, member, album.ID, r.C.TogetherUserID); err != nil {
+			return fmt.Errorf("share album %s with Together user: %w", album.ID, err)
+		}
+		r.Log.Info("mirror album shared with Together user", "member_id", member.ID, "immich_album_id", album.ID, "together_user_id", r.C.TogetherUserID)
 	}
-	r.Log.Info("mirror album shared with Together user", "member_id", member.ID, "immich_album_id", album.ID, "together_user_id", r.C.TogetherUserID)
-	return nil
+	return r.DB.RecordAlbumMarker(logicalID, member.ID, strings.ToLower(r.C.TogetherUserID))
 }
 
 // Discovery examines owned album metadata only. Registered replica IDs are
 // skipped even if several members mark their copies, so names never establish
-// identity. Registration is durable: missing marker shares are repaired by the
-// normal full reconciliation rather than interpreted as unsharing media.
+// identity. Archived mappings also block rediscovery during partial deletion.
 func (r *Reconciler) discoverTogetherAlbums(ctx context.Context, preview bool) ([]Action, error) {
 	if r.C.TogetherUserID == "" {
 		return nil, nil

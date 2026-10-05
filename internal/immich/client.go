@@ -20,6 +20,7 @@ type Client interface {
 	GetAlbum(context.Context, domain.Member, string) (domain.Album, error)
 	ListAlbums(context.Context, domain.Member) ([]domain.Album, error)
 	AddAlbumUser(context.Context, domain.Member, string, string) error
+	DeleteAlbum(context.Context, domain.Member, string) error
 	ListAlbumAssets(context.Context, domain.Member, string) ([]domain.Asset, error)
 	CreateAlbum(context.Context, domain.Member, string, string, string) (domain.Album, error)
 	UpdateAlbum(context.Context, domain.Member, string, string, string, string) error

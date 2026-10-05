@@ -364,6 +364,24 @@ func (f *Client) ListAlbums(_ context.Context, m domain.Member) ([]domain.Album,
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
+
+func (f *Client) DeleteAlbum(_ context.Context, m domain.Member, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return err
+	}
+	a, ok := f.state.Albums[id]
+	if !ok {
+		return immich.ErrNotFound
+	}
+	if a.OwnerID != m.UserID {
+		return errors.New("album owner mismatch")
+	}
+	delete(f.state.Albums, id)
+	delete(f.state.Membership, id)
+	return f.save()
+}
 func (f *Client) ListAlbumAssets(_ context.Context, m domain.Member, id string) ([]domain.Asset, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

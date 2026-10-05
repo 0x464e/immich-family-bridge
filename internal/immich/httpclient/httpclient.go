@@ -294,7 +294,23 @@ func (c *Client) AddAlbumUser(ctx context.Context, m domain.Member, albumID, use
 func (c *Client) GetAlbum(ctx context.Context, m domain.Member, id string) (domain.Album, error) {
 	var a albumDTO
 	e := c.request(ctx, m.Key, "GET", "/albums/"+url.PathEscape(id), nil, &a)
+	if e != nil && strings.Contains(e.Error(), "HTTP 400") {
+		albums, listErr := c.ListAlbums(ctx, m)
+		if listErr == nil {
+			found := false
+			for _, album := range albums {
+				found = found || album.ID == id
+			}
+			if !found {
+				return domain.Album{}, fmt.Errorf("%w: GET /albums/%s", immich.ErrNotFound, id)
+			}
+		}
+	}
 	return a.domain(), e
+}
+
+func (c *Client) DeleteAlbum(ctx context.Context, m domain.Member, id string) error {
+	return c.request(ctx, m.Key, http.MethodDelete, "/albums/"+url.PathEscape(id), nil, nil)
 }
 func (c *Client) ListAlbums(ctx context.Context, m domain.Member) ([]domain.Album, error) {
 	var in []albumDTO

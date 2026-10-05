@@ -123,7 +123,7 @@ func TestTogetherSharingDiscoversOwnedAlbumsAndBackfillsLegacy(t *testing.T) {
 	}
 }
 
-func TestTogetherShareAPIRegistrationFailureRetryAndRepair(t *testing.T) {
+func TestTogetherShareAPIRegistrationFailureRetryAndUnmirror(t *testing.T) {
 	_, db, api, r := setup(t)
 	ctx := context.Background()
 	r.C.TogetherUserID = markerUser
@@ -157,13 +157,15 @@ func TestTogetherShareAPIRegistrationFailureRetryAndRepair(t *testing.T) {
 	if err := r.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	remote, err := api.GetAlbum(ctx, r.C.Members[0], "trip")
-	if err != nil || !r.sharedWithTogether(remote) || len(remote.Users) != 2 || remote.Users[0].Role != "editor" {
-		t.Fatalf("repair changed other participants: %+v, %v", remote, err)
+	if _, err := api.GetAlbum(ctx, r.C.Members[0], "trip"); !errors.Is(err, immich.ErrNotFound) {
+		t.Fatalf("unshare did not delete source: %v", err)
+	}
+	if record, found, err := db.AlbumDeletion(id); err != nil || !found || record.State != "deleted" {
+		t.Fatalf("missing recovery record: %+v, %v", record, err)
 	}
 	albums, _ := db.Albums()
-	if len(albums) != 1 {
-		t.Fatal("repair created another logical album")
+	if len(albums) != 0 {
+		t.Fatal("deleted album still active")
 	}
 }
 

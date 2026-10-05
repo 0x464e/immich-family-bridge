@@ -38,7 +38,7 @@ type cancelingClient struct {
 type restrictedClient struct{ immich.Client }
 
 func (restrictedClient) Permissions(context.Context, domain.Member) ([]string, error) {
-	return []string{"asset.read", "stack.read", "stack.create", "stack.delete"}, nil
+	return []string{"asset.read", "stack.read", "stack.create", "stack.delete", "album.delete"}, nil
 }
 
 func TestCleanupRequiresAssetDeletePermission(t *testing.T) {

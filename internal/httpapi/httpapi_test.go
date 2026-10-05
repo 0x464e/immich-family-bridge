@@ -101,6 +101,75 @@ func TestDryRunModeReportsAndBlocksActiveEndpoint(t *testing.T) {
 	}
 }
 
+func TestAlbumLifecycleAPI(t *testing.T) {
+	root := t.TempDir()
+	c := config.Config{FamilyID: "family", TogetherAlbumName: "Together", Database: filepath.Join(root, "state.sqlite"), APIToken: "secret", Members: []domain.Member{{ID: "a", UserID: "u-a", LibraryID: "l-a"}, {ID: "b", UserID: "u-b", LibraryID: "l-b"}}}
+	db, err := store.Open(c.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Init(c.FamilyID, c.Members); err != nil {
+		t.Fatal(err)
+	}
+	api, err := fake.New(c, filepath.Join(root, "fake.json"), fake.Seed{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := reconcile.New(c, db, api, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	together, err := r.EnsureTogether(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := api.CreateAlbum(context.Background(), c.Members[0], "test-source", "Example", "Description")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Register(context.Background(), "a", remote.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := (&Server{C: c, DB: db, R: r}).Handler()
+	for _, tc := range []struct {
+		method, path, token, contains string
+		want                          int
+	}{
+		{"DELETE", "/api/albums/" + id, "", "", 401},
+		{"POST", "/api/albums/" + id + "/restore", "", "", 401},
+		{"GET", "/api/albums/deleted", "", "", 401},
+		{"DELETE", "/api/albums/unknown", "secret", "", 404},
+		{"POST", "/api/albums/unknown/restore", "secret", "", 404},
+		{"DELETE", "/api/albums/" + together, "secret", "cannot be unmirrored", 409},
+		{"POST", "/api/albums/" + together + "/restore", "secret", "cannot be unmirrored", 409},
+		{"DELETE", "/api/albums/" + id, "secret", "ok", 200},
+		{"DELETE", "/api/albums/" + id, "secret", "ok", 200},
+		{"GET", "/api/albums/deleted", "secret", "Example", 200},
+		{"POST", "/api/albums/" + id + "/restore", "secret", "ok", 200},
+		{"POST", "/api/albums/" + id + "/restore", "secret", "ok", 200},
+		{"GET", "/api/albums/deleted", "secret", "[]", 200},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		if tc.token != "" {
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.contains) {
+			t.Fatalf("%s %s: %d %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+	r.C.DryRun = true
+	for _, tc := range []struct{ method, path string }{{"DELETE", "/api/albums/" + id}, {"POST", "/api/albums/" + id + "/restore"}} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 409 || !strings.Contains(rec.Body.String(), "dry-run") {
+			t.Fatal("dry-run endpoint allowed mutation")
+		}
+	}
+}
+
 func TestForwardAuthRedirectsOnlyReadyActiveReplica(t *testing.T) {
 	s, db := resolverTestServer(t, "u-bob", nil)
 	req := httptest.NewRequest(http.MethodGet, "/forward-auth", nil)

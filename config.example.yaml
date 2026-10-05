@@ -19,8 +19,10 @@ together_album_name: Together
 # member and needs no API key or External Library. Leave empty to disable.
 # All registered member albums (including Together and existing/API registrations)
 # are also shared with this user as a viewer. Member keys additionally require
-# albumUser.create. Removing this viewer does not unregister an album: the bridge
-# restores the share on the next full discovery, without unsharing any media.
+# albumUser.create. Once confirmed, removing this viewer from ANY member's copy
+# archives and DELETES that album from ALL members, including the original.
+# Photos/files and Together membership are retained. The catch-all Together
+# album is protected and its missing viewer is restored instead of deleting it.
 together_user_id: ""
 
 # Immich API base URL as reached from the bridge container. Include the /api
@@ -123,7 +125,7 @@ members:
     library_id: replace-with-alice-recipient-library-id
     # Environment variable holding this user's Immich API key. The bridge checks
     # that the key belongs to user_id. Give it user.read, asset.read,
-    # assetFile.read, album.create, album.read, album.update,
+    # assetFile.read, album.create, album.read, album.update, album.delete,
     # albumAsset.create, albumAsset.delete, and job.create permissions. Add
     # albumUser.create when together_user_id is set, and asset.delete when
     # remove_unshared_replicas is true. job.create refreshes

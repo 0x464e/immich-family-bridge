@@ -118,6 +118,27 @@ type Album struct {
 	Users       []AlbumUser `json:"users,omitempty"`
 }
 
+// AlbumDeletion stores only metadata and IDs, never media. Progress is durable
+// so partially completed deletion/restoration can resume after a restart.
+type AlbumDeletion struct {
+	Album        LogicalAlbum          `json:"album"`
+	DeletedAt    string                `json:"deletedAt"`
+	RequestedBy  string                `json:"requestedBy"`
+	State        string                `json:"state"`
+	RestoreToken string                `json:"restoreToken,omitempty"`
+	Replicas     []DeletedAlbumReplica `json:"replicas"`
+}
+
+type DeletedAlbumReplica struct {
+	MemberID        string   `json:"memberId"`
+	AlbumID         string   `json:"albumId"`
+	AssetIDs        []string `json:"assetIds"`
+	CoverID         string   `json:"coverId,omitempty"`
+	Deleted         bool     `json:"deleted"`
+	RestoredAlbumID string   `json:"restoredAlbumId,omitempty"`
+	Restored        bool     `json:"restored"`
+}
+
 type Library struct {
 	ID          string     `json:"id"`
 	OwnerID     string     `json:"ownerId"`

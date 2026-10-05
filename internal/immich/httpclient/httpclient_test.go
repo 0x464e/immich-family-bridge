@@ -383,6 +383,7 @@ func TestReadOnlyClientAllowsSearchButBlocksWrites(t *testing.T) {
 		},
 		func() error { return c.UpdateAlbum(context.Background(), m, "album", "name", "description", "") },
 		func() error { return c.AddAlbumUser(context.Background(), m, "album", "marker") },
+		func() error { return c.DeleteAlbum(context.Background(), m, "album") },
 		func() error { return c.AddAssets(context.Background(), m, "album", []string{"asset"}) },
 		func() error { return c.RemoveAssets(context.Background(), m, "album", []string{"asset"}) },
 		func() error { return c.DeleteAssets(context.Background(), m, []string{"asset"}) },
@@ -438,5 +439,41 @@ func TestAlbumSharingUsesViewerAndPreservesParticipantRoles(t *testing.T) {
 	users, err := c.ListUsers(context.Background(), m)
 	if err != nil || len(users) != 1 || users[0].ID != "marker" {
 		t.Fatalf("users=%+v, err=%v", users, err)
+	}
+}
+
+func TestAlbumDeletionHTTPContractAndMissingAlbumConfirmation(t *testing.T) {
+	allowList := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "member" {
+			t.Fatal("wrong deletion key")
+		}
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/albums/id":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/albums/id":
+			w.WriteHeader(http.StatusBadRequest)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/albums":
+			if !allowList {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Fatalf("unexpected deletion endpoint: %s %s", r.Method, r.URL)
+		}
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	member := domain.Member{Key: "member"}
+	if err := c.DeleteAlbum(context.Background(), member, "id"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetAlbum(context.Background(), member, "id"); !errors.Is(err, immich.ErrNotFound) {
+		t.Fatal("confirmed missing album not normalized:", err)
+	}
+	allowList = false
+	if _, err := c.GetAlbum(context.Background(), member, "id"); err == nil || errors.Is(err, immich.ErrNotFound) {
+		t.Fatal("unconfirmed absence treated as missing:", err)
 	}
 }

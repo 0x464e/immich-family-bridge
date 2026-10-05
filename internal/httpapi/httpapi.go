@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -78,6 +80,35 @@ func (s *Server) Handler() http.Handler {
 		}
 		write(w, 200, a)
 	})
+	api.HandleFunc("GET /api/albums/deleted", func(w http.ResponseWriter, r *http.Request) {
+		records, err := s.DB.AlbumDeletions()
+		if err != nil {
+			write(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		write(w, 200, records)
+	})
+	albumOperation := func(restore bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var err error
+			if restore {
+				err = s.R.RestoreAlbum(r.Context(), r.PathValue("id"))
+			} else {
+				err = s.R.UnmirrorAlbum(r.Context(), r.PathValue("id"))
+			}
+			if err != nil {
+				status := http.StatusConflict
+				if errors.Is(err, sql.ErrNoRows) {
+					status = http.StatusNotFound
+				}
+				write(w, status, map[string]string{"error": err.Error()})
+				return
+			}
+			write(w, 200, map[string]string{"status": "ok", "id": r.PathValue("id")})
+		}
+	}
+	api.HandleFunc("DELETE /api/albums/{id}", albumOperation(false))
+	api.HandleFunc("POST /api/albums/{id}/restore", albumOperation(true))
 	api.HandleFunc("GET /api/replicas", func(w http.ResponseWriter, r *http.Request) {
 		a, e := s.DB.Replicas()
 		if e != nil {

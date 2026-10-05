@@ -226,13 +226,18 @@ def main():
         wait_complete(c, mappings[0][0], 2, members, marker)
         request("/albums/" + auto1 + "/user/" + marker, members["user1"], method="DELETE")
         reconcile()
-        check(marker_present(members["user1"], auto1, marker), "removed marker was not restored")
+        archived = request("/api/albums/deleted", bridge=True)
+        check(any(r["album"]["id"] == mappings[0][0] and r["state"] == "deleted" for r in archived),
+              "removed marker did not archive/delete the logical album")
+        check(not any(a["id"] == auto1 for a in request("/albums?isOwned=true", members["user1"])),
+              "unmirror retained original album")
+        request("/api/albums/" + mappings[0][0] + "/restore", method="POST", bridge=True)
         wait_complete(c, mappings[0][0], 2, members, marker)
         total = c.execute("SELECT COUNT(*) FROM logical_albums").fetchone()[0]
         reconcile()
         check(c.execute("SELECT COUNT(*) FROM logical_albums").fetchone()[0] == total,
               "discovery registered existing replicas again")
-        print("PASS: later additions sync; marker removal repaired without lost media or duplicate albums", flush=True)
+        print("PASS: later additions sync; marker removal deletes albums; restore retains media without duplication", flush=True)
     finally:
         for key_id in scoped:
             request("/api-keys/" + key_id, members["user1"], method="DELETE")

@@ -241,6 +241,11 @@ func (r *Reconciler) registerWithReplicas(ctx context.Context, memberID, albumID
 		if err != nil {
 			return id, err
 		}
+		if _, archived, err := r.DB.AlbumDeletion(id); err != nil {
+			return id, err
+		} else if archived {
+			return id, errors.New("album was unmirrored; use the restore endpoint")
+		}
 		albums, e := r.DB.Albums()
 		if e != nil {
 			return id, e
@@ -337,7 +342,7 @@ func (r *Reconciler) ensureAlbumReplicas(ctx context.Context, a domain.LogicalAl
 				if err != nil {
 					return err
 				}
-				if err := r.ensureTogetherShare(ctx, m, remote); err != nil {
+				if err := r.ensureTogetherShare(ctx, a.ID, m, remote); err != nil {
 					return err
 				}
 			}
@@ -352,7 +357,7 @@ func (r *Reconciler) ensureAlbumReplicas(ctx context.Context, a domain.LogicalAl
 				if err := r.DB.SetAlbumReplica(a.ID, m.ID, existing.ID); err != nil {
 					return err
 				}
-				if err := r.ensureTogetherShare(ctx, m, existing); err != nil {
+				if err := r.ensureTogetherShare(ctx, a.ID, m, existing); err != nil {
 					return err
 				}
 				continue
@@ -368,7 +373,7 @@ func (r *Reconciler) ensureAlbumReplicas(ctx context.Context, a domain.LogicalAl
 		if err := r.DB.SetAlbumReplica(a.ID, m.ID, made.ID); err != nil {
 			return err
 		}
-		if err := r.ensureTogetherShare(ctx, m, made); err != nil {
+		if err := r.ensureTogetherShare(ctx, a.ID, m, made); err != nil {
 			return err
 		}
 	}
@@ -398,6 +403,18 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	started := r.now()
 	if err := r.startCycle(prepareBatchSize, lookupBatchSize); err != nil {
 		return err
+	}
+	if err := r.resumeAlbumOperations(ctx); err != nil {
+		return err
+	}
+	missing, err := r.missingAlbumMarkers(ctx)
+	if err != nil {
+		return err
+	}
+	for id, requestedBy := range missing {
+		if err := r.unmirrorAlbum(ctx, id, requestedBy); err != nil {
+			return err
+		}
 	}
 	if _, err := r.discoverTogetherAlbums(ctx, false); err != nil {
 		return err
@@ -440,9 +457,9 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	return r.applyPlans(ctx, plans, started, "discovery")
 }
 
-// Work continues only decisions already persisted by a successful full
-// observation. It makes no membership decisions and performs no album search.
-// This lets a large import advance without repeatedly crawling every album.
+// Steady Work continues only decisions persisted by a full observation, with
+// no new membership decisions or album search. Explicit pending album deletion/
+// restoration is resumed first; this exceptional path may read/search albums.
 func (r *Reconciler) Work(ctx context.Context) error {
 	if r.C.DryRun {
 		return ErrDryRunMode
@@ -451,6 +468,9 @@ func (r *Reconciler) Work(ctx context.Context) error {
 	defer r.mu.Unlock()
 	started := r.now()
 	if err := r.startCycle(100, 50); err != nil {
+		return err
+	}
+	if err := r.resumeAlbumOperations(ctx); err != nil {
 		return err
 	}
 	albums, err := r.DB.Albums()
@@ -1473,6 +1493,8 @@ func (a Action) Message() string {
 		return "dry-run: album shared with Together user registered locally for mirroring"
 	case "share_album":
 		return "dry-run: would share mirror album with Together user as viewer"
+	case "unmirror_album":
+		return "dry-run: would archive and delete this mirror album for all members; photos retained"
 	case "mapping_inconsistency":
 		return "dry-run: unknown bridge or foreign asset needs review"
 	case "unsupported_asset":
@@ -1511,6 +1533,10 @@ func (a Action) Message() string {
 func (r *Reconciler) DryRun(ctx context.Context) ([]Action, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	missing, err := r.missingAlbumMarkers(ctx)
+	if err != nil {
+		return nil, err
+	}
 	discovered, err := r.discoverTogetherAlbums(ctx, true)
 	if err != nil {
 		return nil, err
@@ -1519,7 +1545,15 @@ func (r *Reconciler) DryRun(ctx context.Context) ([]Action, error) {
 	if err != nil {
 		return nil, err
 	}
-	preview, err := r.previewPlans(ctx, albums)
+	active := albums[:0]
+	for _, album := range albums {
+		if _, deleted := missing[album.ID]; deleted {
+			discovered = append(discovered, Action{Kind: "unmirror_album", AlbumID: album.ID, AlbumName: album.Name})
+		} else {
+			active = append(active, album)
+		}
+	}
+	preview, err := r.previewPlans(ctx, active)
 	return append(discovered, preview...), err
 }
 
@@ -1536,7 +1570,7 @@ func (r *Reconciler) Check(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("member %s API key permissions: %w", m.ID, err)
 		}
-		required := []string{"stack.read", "stack.create", "stack.delete"}
+		required := []string{"stack.read", "stack.create", "stack.delete", "album.delete"}
 		if r.C.TogetherUserID != "" {
 			required = append(required, "albumUser.create", "user.read")
 		}

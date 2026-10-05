@@ -79,7 +79,7 @@ func (s *Store) Migrate() error {
 	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
-	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql", "migrations/006_album_cover_observations.sql", "migrations/007_stacks.sql", "migrations/008_work_cursors.sql"}
+	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql", "migrations/006_album_cover_observations.sql", "migrations/007_stacks.sql", "migrations/008_work_cursors.sql", "migrations/009_album_deletions.sql"}
 	var max int
 	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&max); err != nil {
 		return err
@@ -280,7 +280,7 @@ func (s *Store) UpdateAlbum(id, name, description, cover string) error {
 	if cover != "" {
 		cv = cover
 	}
-	result, err := s.DB.Exec(`UPDATE logical_albums SET name=?,description=?,cover_logical_asset_id=? WHERE id=?`, name, description, cv, id)
+	result, err := s.DB.Exec(`UPDATE logical_albums SET name=?,description=?,cover_logical_asset_id=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM album_deletions WHERE logical_album_id=?)`, name, description, cv, id, id)
 	if err != nil {
 		return err
 	}
@@ -292,7 +292,7 @@ func (s *Store) UpdateAlbum(id, name, description, cover string) error {
 }
 
 func (s *Store) Albums() ([]domain.LogicalAlbum, error) {
-	r, err := s.DB.Query(`SELECT id,name,description,COALESCE(cover_logical_asset_id,''),initialized,COALESCE(system_key,'') FROM logical_albums ORDER BY name,id`)
+	r, err := s.DB.Query(`SELECT id,name,description,COALESCE(cover_logical_asset_id,''),initialized,COALESCE(system_key,'') FROM logical_albums WHERE NOT EXISTS (SELECT 1 FROM album_deletions WHERE logical_album_id=id) ORDER BY name,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -399,6 +399,7 @@ func (s *Store) ResolveMirrorAlbum(ctx context.Context, requestedAlbumID, userID
 		  AND target.immich_album_id IS NOT NULL
 		  AND target.immich_album_id != ''
 		  AND target.state='ready'
+		  AND NOT EXISTS (SELECT 1 FROM album_deletions WHERE logical_album_id=target.logical_album_id)
 		LIMIT 1`, requestedAlbumID, userID).Scan(&target)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
