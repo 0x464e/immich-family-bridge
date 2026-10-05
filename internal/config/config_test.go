@@ -97,6 +97,13 @@ members:
 	if c, err := Load(path); err != nil || c.TogetherAlbumName != "Family Room" {
 		t.Fatalf("custom Together album name not loaded: %q, %v", c.TogetherAlbumName, err)
 	}
+	marker := "33333333-3333-4333-8333-333333333333"
+	if err := os.WriteFile(path, []byte("together_user_id: "+marker+"\n"+base), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := Load(path); err != nil || c.TogetherUserID != marker {
+		t.Fatalf("Together user not loaded: %q, %v", c.TogetherUserID, err)
+	}
 }
 
 func TestSourceMappingsAndValidation(t *testing.T) {
@@ -119,6 +126,16 @@ func TestSourceMappingsAndValidation(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	c.TogetherUserID = "Together"
+	if err := c.Validate(); err == nil {
+		t.Fatal("accepted a marker name instead of a UUID")
+	}
+	c.TogetherUserID = "33333333-3333-4333-8333-333333333333"
+	c.Members[0].UserID = c.TogetherUserID
+	if err := c.Validate(); err == nil {
+		t.Fatal("accepted a family member as the marker account")
+	}
+	c.Members[0].UserID, c.TogetherUserID = "u1", ""
 	c.DiscoveryInterval = "bad"
 	if err := c.Validate(); err == nil {
 		t.Fatal("accepted invalid discovery interval")

@@ -227,6 +227,12 @@ func (r *Reconciler) Register(ctx context.Context, memberID, albumID string) (st
 func (r *Reconciler) RegisterWithReplicas(ctx context.Context, memberID, albumID string, existing map[string]string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.registerWithReplicas(ctx, memberID, albumID, existing, false)
+}
+
+// registerWithReplicas is also used by discovery while the cycle lock is held.
+func (r *Reconciler) registerWithReplicas(ctx context.Context, memberID, albumID string, existing map[string]string, preview bool) (string, error) {
+	dryRun := r.C.DryRun || preview
 	m, ok := r.member(memberID)
 	if !ok {
 		return "", errors.New("unknown member")
@@ -241,7 +247,7 @@ func (r *Reconciler) RegisterWithReplicas(ctx context.Context, memberID, albumID
 		}
 		for _, a := range albums {
 			if a.ID == id {
-				if r.C.DryRun {
+				if dryRun {
 					return id, nil
 				}
 				return id, r.ensureAlbumReplicas(ctx, a)
@@ -297,7 +303,7 @@ func (r *Reconciler) RegisterWithReplicas(ctx context.Context, memberID, albumID
 			}
 		}
 	}
-	if !r.C.DryRun {
+	if !dryRun {
 		if err := r.ensureAlbumReplicas(ctx, logical); err != nil {
 			return id, err
 		}
@@ -326,6 +332,15 @@ func (r *Reconciler) ensureAlbumReplicas(ctx context.Context, a domain.LogicalAl
 	}
 	for _, m := range r.C.Members {
 		if reps[m.ID] != "" {
+			if r.C.TogetherUserID != "" {
+				remote, err := r.API.GetAlbum(ctx, m, reps[m.ID])
+				if err != nil {
+					return err
+				}
+				if err := r.ensureTogetherShare(ctx, m, remote); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if a.SystemKey == "together" {
@@ -335,6 +350,9 @@ func (r *Reconciler) ensureAlbumReplicas(ctx context.Context, a domain.LogicalAl
 			}
 			if found {
 				if err := r.DB.SetAlbumReplica(a.ID, m.ID, existing.ID); err != nil {
+					return err
+				}
+				if err := r.ensureTogetherShare(ctx, m, existing); err != nil {
 					return err
 				}
 				continue
@@ -348,6 +366,9 @@ func (r *Reconciler) ensureAlbumReplicas(ctx context.Context, a domain.LogicalAl
 			return errors.New("created album owner mismatch")
 		}
 		if err := r.DB.SetAlbumReplica(a.ID, m.ID, made.ID); err != nil {
+			return err
+		}
+		if err := r.ensureTogetherShare(ctx, m, made); err != nil {
 			return err
 		}
 	}
@@ -376,6 +397,9 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	defer r.mu.Unlock()
 	started := r.now()
 	if err := r.startCycle(prepareBatchSize, lookupBatchSize); err != nil {
+		return err
+	}
+	if _, err := r.discoverTogetherAlbums(ctx, false); err != nil {
 		return err
 	}
 	albums, err := r.DB.Albums()
@@ -1445,6 +1469,10 @@ func (a Action) Message() string {
 	switch a.Kind {
 	case "create_album_replica":
 		return "dry-run: would create album for member"
+	case "register_mirror_album":
+		return "dry-run: album shared with Together user registered locally for mirroring"
+	case "share_album":
+		return "dry-run: would share mirror album with Together user as viewer"
 	case "mapping_inconsistency":
 		return "dry-run: unknown bridge or foreign asset needs review"
 	case "unsupported_asset":
@@ -1483,11 +1511,16 @@ func (a Action) Message() string {
 func (r *Reconciler) DryRun(ctx context.Context) ([]Action, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	discovered, err := r.discoverTogetherAlbums(ctx, true)
+	if err != nil {
+		return nil, err
+	}
 	albums, err := r.DB.Albums()
 	if err != nil {
 		return nil, err
 	}
-	return r.previewPlans(ctx, albums)
+	preview, err := r.previewPlans(ctx, albums)
+	return append(discovered, preview...), err
 }
 
 func (r *Reconciler) Check(ctx context.Context) error {
@@ -1504,6 +1537,9 @@ func (r *Reconciler) Check(ctx context.Context) error {
 			return fmt.Errorf("member %s API key permissions: %w", m.ID, err)
 		}
 		required := []string{"stack.read", "stack.create", "stack.delete"}
+		if r.C.TogetherUserID != "" {
+			required = append(required, "albumUser.create", "user.read")
+		}
 		if r.C.RemoveUnshared {
 			required = append(required, "asset.delete")
 		}
@@ -1524,6 +1560,18 @@ func (r *Reconciler) Check(ctx context.Context) error {
 		if library.ID != m.LibraryID || library.OwnerID != m.UserID || len(library.ImportPaths) != 1 || library.ImportPaths[0] != expected {
 			return fmt.Errorf("member %s library identity or import path mismatch", m.ID)
 		}
+	}
+	if r.C.TogetherUserID != "" {
+		users, err := r.API.ListUsers(ctx, r.C.Members[0])
+		if err != nil {
+			return fmt.Errorf("Together user lookup: %w", err)
+		}
+		for _, user := range users {
+			if strings.EqualFold(user.ID, r.C.TogetherUserID) {
+				return nil
+			}
+		}
+		return errors.New("together_user_id does not identify an existing Immich user")
 	}
 	return nil
 }

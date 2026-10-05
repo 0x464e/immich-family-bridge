@@ -39,12 +39,14 @@ type Config struct {
 	PollInterval        string          `yaml:"poll_interval"`
 	DiscoveryInterval   string          `yaml:"discovery_interval"`
 	TogetherAlbumName   string          `yaml:"together_album_name"`
+	TogetherUserID      string          `yaml:"together_user_id"`
 	RemoveUnshared      bool            `yaml:"remove_unshared_replicas"`
 	Members             []domain.Member `yaml:"members"`
 }
 
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 var urlSafeToken = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+var userUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
@@ -107,6 +109,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.TogetherAlbumName) == "" || c.TogetherAlbumName != strings.TrimSpace(c.TogetherAlbumName) {
 		return errors.New("together_album_name must be a nonempty name without surrounding whitespace")
+	}
+	if c.TogetherUserID != "" && !userUUID.MatchString(c.TogetherUserID) {
+		return errors.New("together_user_id must be an Immich user UUID")
 	}
 	u, err := url.Parse(c.ImmichURL)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.TrimRight(u.Path, "/") != "/api" {
@@ -172,6 +177,9 @@ func (c Config) Validate() error {
 	users := map[string]bool{}
 	libraries := map[string]bool{}
 	for _, m := range c.Members {
+		if c.TogetherUserID != "" && strings.EqualFold(m.UserID, c.TogetherUserID) {
+			return errors.New("together_user_id must not be a family member")
+		}
 		if !safeID.MatchString(m.ID) || m.UserID == "" || m.LibraryID == "" || m.KeyEnv == "" || m.Key == "" {
 			return fmt.Errorf("invalid member %q or unresolved key", m.ID)
 		}

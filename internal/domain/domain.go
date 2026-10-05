@@ -100,12 +100,22 @@ func equalFoldExt(path, ext string) bool {
 	return true
 }
 
+type User struct {
+	ID string `json:"id"`
+}
+
+type AlbumUser struct {
+	UserID string `json:"userId"`
+	Role   string `json:"role"`
+}
+
 type Album struct {
-	ID          string `json:"id"`
-	OwnerID     string `json:"ownerId"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	CoverID     string `json:"coverId"`
+	ID          string      `json:"id"`
+	OwnerID     string      `json:"ownerId"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	CoverID     string      `json:"coverId"`
+	Users       []AlbumUser `json:"users,omitempty"`
 }
 
 type Library struct {

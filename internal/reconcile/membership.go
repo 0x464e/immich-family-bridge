@@ -42,6 +42,9 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 				return nil, fmt.Errorf("missing album replica for %s", m.ID)
 			}
 			p.actions = append(p.actions, Action{Kind: "create_album_replica", MemberID: m.ID})
+			if r.C.TogetherUserID != "" {
+				p.actions = append(p.actions, Action{Kind: "share_album", MemberID: m.ID})
+			}
 			p.observations = append(p.observations, o)
 			continue
 		}
@@ -51,6 +54,9 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 		}
 		if remote.OwnerID != "" && remote.OwnerID != m.UserID {
 			return nil, fmt.Errorf("album owner mismatch for %s", m.ID)
+		}
+		if preview && r.C.TogetherUserID != "" && !r.sharedWithTogether(remote) {
+			p.actions = append(p.actions, Action{Kind: "share_album", MemberID: m.ID})
 		}
 		if remote.Name != a.Name || remote.Description != a.Description {
 			p.actions = append(p.actions, Action{Kind: "update_album_metadata", MemberID: m.ID})

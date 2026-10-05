@@ -133,6 +133,12 @@ func (c *Client) Permissions(ctx context.Context, m domain.Member) ([]string, er
 	err := c.request(ctx, m.Key, "GET", "/api-keys/me", nil, &v)
 	return v.Permissions, err
 }
+
+func (c *Client) ListUsers(ctx context.Context, m domain.Member) ([]domain.User, error) {
+	var users []domain.User
+	err := c.request(ctx, m.Key, http.MethodGet, "/users", nil, &users)
+	return users, err
+}
 func (c *Client) GetLibrary(ctx context.Context, m domain.Member) (domain.Library, error) {
 	var library domain.Library
 	if c.AdminKey == "" {
@@ -249,6 +255,7 @@ type albumDTO struct {
 	Description string  `json:"description"`
 	CoverID     *string `json:"albumThumbnailAssetId"`
 	Users       []struct {
+		Role string `json:"role"`
 		User struct {
 			ID string `json:"id"`
 		} `json:"user"`
@@ -267,7 +274,22 @@ func (a albumDTO) domain() domain.Album {
 			x.OwnerID = a.Users[0].ID
 		}
 	}
+	for _, user := range a.Users {
+		id := user.User.ID
+		if id == "" {
+			id = user.ID
+		}
+		x.Users = append(x.Users, domain.AlbumUser{UserID: id, Role: user.Role})
+		if user.Role == "owner" {
+			x.OwnerID = id
+		}
+	}
 	return x
+}
+
+func (c *Client) AddAlbumUser(ctx context.Context, m domain.Member, albumID, userID string) error {
+	return c.request(ctx, m.Key, http.MethodPut, "/albums/"+url.PathEscape(albumID)+"/users",
+		map[string]any{"albumUsers": []domain.AlbumUser{{UserID: userID, Role: "viewer"}}}, nil)
 }
 func (c *Client) GetAlbum(ctx context.Context, m domain.Member, id string) (domain.Album, error) {
 	var a albumDTO

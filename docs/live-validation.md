@@ -99,3 +99,44 @@ zero stacks. The test used existing disposable images, not production media.
 
 This validates the discovery/work split and one create/delete stack sequence;
 it is not a throughput or crash-recovery guarantee for a 25,000-asset library.
+
+## Share-to-Together album registration (2026-10-05)
+
+The new `together_user_id` feature was built and exercised only on the local
+disposable Immich 3.2.2 instance (`127.0.0.1:2283`) and dev bridge
+(`127.0.0.1:8081`). The three existing test members retained their own recipient
+libraries; a fourth account, `together@test.com`, served only as a viewer marker
+and had no bridge API key or recipient library. Production containers,
+configuration, credentials, media, and database were not accessed or changed.
+
+The existing registrations, including all three catch-all Together albums,
+were backfilled with viewer shares. Two different members then uploaded unique
+synthetic PNGs, created albums with the same name, and shared them with the
+marker account. Scheduled discovery registered these as two separate logical
+albums without manual API registration. An ordinary album shared with another
+family member was left unregistered. All three members' mirrored albums had
+exactly the expected translated asset IDs, and every recipient file matched its
+source by inode. API registration also added the marker immediately to all
+replicas, and repeating registration returned the same logical album ID.
+
+A temporary scoped key with `user.read` and `album.read` received HTTP 403 when
+adding a viewer; adding `albumUser.create` made the same request succeed. These
+temporary keys were revoked afterward. The test also added a new photo to an
+already registered album and verified its later import across all members.
+Removing the marker share was repaired on full reconciliation without lost
+media or duplicate logical albums. Repeated cycles emitted no bridge warnings
+or errors during the active integration run.
+
+The dev bridge was separately restarted in dry-run mode. Both scheduled marker
+discovery and manual API registration saved only local mappings: no remote
+replica albums or marker shares were created. After returning to active mode,
+both registrations completed with exact membership, matching hardlinks, and
+viewer shares. SQLite's integrity check returned `ok`. The dev bridge was left
+in active mode, with the disposable fixtures available for inspection.
+
+`scripts/test-album-sharing.py` repeats the active integration checks against
+this guarded localhost setup. It generates its media in memory and checks
+test-account identities and container mounts before making writes. Unit tests
+add sharing-failure retry, preserved participant roles, disabled-feature
+behavior, permission/user checks, and read-only preview coverage. The full Go
+test suite, `go vet`, and the race-enabled test suite passed.

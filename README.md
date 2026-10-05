@@ -82,6 +82,41 @@ Confirm the mode with the authenticated `GET /api/status` endpoint before regist
 
 The internal API requires `Authorization: Bearer <FAMILYBRIDGE_API_TOKEN>` for every `/api/` endpoint. Keep it on localhost or behind an authenticated private network. In active mode, album registration creates missing member albums immediately; polling or a manual reconciliation then fills them. In dry-run mode, registration only saves the mapping in SQLite.
 
+### Mark albums using Immich's Share dialog
+
+Set the optional `together_user_id` to the UUID of a dedicated Immich account,
+for example one named **Together**. This is separate from `together_album_name`:
+the account acts as a marker, while the album remains the authoritative shared
+set. Do not add the marker account to `members`; it needs neither an API key nor
+an External Library. Member API keys additionally require `albumUser.create`
+(and the already required `user.read` and `album.read`). Startup checks the new
+permission and that the marker user exists. When the setting is empty, the
+existing API-only registration behavior is unchanged.
+
+In Immich's web or mobile app, open an album you own, choose Share, and add the
+Together account as a viewer. On the next full discovery (`discovery_interval`,
+default 5 minutes), the bridge registers that album and creates the other
+members' matching albums. `POST /api/reconcile` runs discovery immediately.
+Album UUIDs, not names, establish identity: marking an already managed replica
+does not create another logical album, while distinct marked albums with the
+same name remain distinct.
+
+Every registered album replica, including each member's Together album, is
+shared with this account. Existing registrations are backfilled on the first
+active discovery after enabling the setting; new API registrations are marked
+immediately. Missing shares are added as viewer without changing other users or
+an existing marker role. A failed sharing request is reported and retried from
+the saved mapping without duplicating the registration.
+
+Registration is durable. Removing the Together account from a registered album
+does **not** stop mirroring or remove any media: the next full discovery restores
+the share. Disabling `together_user_id` stops discovery/share maintenance but
+keeps existing registrations and shares. There is no unregister workflow yet.
+
+In dry-run mode, marked albums are registered only in local SQLite, matching
+manual dry-run registration. Logs preview missing replicas and marker shares;
+no Immich sharing, albums, media, or memberships are changed until activation.
+
 ## Transparent media and mirror-album links
 
 The `GET /forward-auth` endpoint is intended only for a private Traefik ForwardAuth middleware on direct `/photos/<uuid>` and bridge-managed `/albums/<uuid>` page requests. Traefik sends a dedicated Basic-auth token plus the browser's `Cookie` header. The bridge asks Immich's internal `/api/users/me` endpoint to identify that existing session, then redirects active shared media to the current member's ready asset replica, or a recorded mirror album to that member's matching album. It never decodes or logs the browser cookie. Missing sessions, expired links, unknown members, non-bridge assets or albums, and lookup failures return `204` so Traefik continues to Immich normally; this preserves Immich's login and deep-link recovery flow.
@@ -107,7 +142,7 @@ curl --fail-with-body -sS -X POST \
   http://127.0.0.1:6773/api/reconcile
 ~~~
 
-`POST /api/albums` also accepts `"replicas":{"bob":"<bob-album-id>"}` to attach existing albums for other members. The first reconciliation includes the union of their member-owned assets and adds those assets to Together as well. Register only additional logical albums you want bridged. The catch-all album is registered automatically; existing member albums matching `together_album_name` are attached when unique, and missing ones are created on the first active cycle. Its name remains controlled by the config value. Other albums are not discovered automatically.
+`POST /api/albums` also accepts `"replicas":{"bob":"<bob-album-id>"}` to attach existing albums for other members. The first reconciliation includes the union of their member-owned assets and adds those assets to Together as well. Register only additional logical albums you want bridged. The catch-all album is registered automatically; existing member albums matching `together_album_name` are attached when unique, and missing ones are created on the first active cycle. Its name remains controlled by the config value. Other albums are discovered automatically only when `together_user_id` is configured and they are shared with that account.
 
 | Endpoint | Purpose |
 | --- | --- |

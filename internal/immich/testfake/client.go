@@ -19,6 +19,7 @@ import (
 )
 
 type State struct {
+	Users      map[string]domain.User     `json:"users"`
 	Assets     map[string]domain.Asset    `json:"assets"`
 	Albums     map[string]domain.Album    `json:"albums"`
 	Membership map[string]map[string]bool `json:"membership"`
@@ -64,6 +65,12 @@ func New(c config.Config, statePath string, data Seed) (*Client, error) {
 	}
 	if f.state.Assets == nil {
 		f.state.Assets = map[string]domain.Asset{}
+	}
+	if f.state.Users == nil {
+		f.state.Users = map[string]domain.User{}
+	}
+	for _, m := range c.Members {
+		f.state.Users[m.UserID] = domain.User{ID: m.UserID}
 	}
 	if f.state.Albums == nil {
 		f.state.Albums = map[string]domain.Album{}
@@ -218,6 +225,61 @@ func (f *Client) Me(_ context.Context, m domain.Member) (string, error) {
 }
 func (f *Client) Permissions(context.Context, domain.Member) ([]string, error) {
 	return []string{"all"}, nil
+}
+
+func (f *Client) AddUser(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state.Users[id] = domain.User{ID: id}
+	return f.save()
+}
+
+func (f *Client) SetAlbumUsers(albumID string, users []domain.AlbumUser) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.state.Albums[albumID]
+	if !ok {
+		return immich.ErrNotFound
+	}
+	a.Users = append([]domain.AlbumUser(nil), users...)
+	f.state.Albums[albumID] = a
+	return f.save()
+}
+
+func (f *Client) ListUsers(context.Context, domain.Member) ([]domain.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return nil, err
+	}
+	var users []domain.User
+	for _, user := range f.state.Users {
+		users = append(users, user)
+	}
+	return users, nil
+}
+
+func (f *Client) AddAlbumUser(_ context.Context, m domain.Member, albumID, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return err
+	}
+	a, ok := f.state.Albums[albumID]
+	if !ok || a.OwnerID != m.UserID {
+		return immich.ErrNotFound
+	}
+	if _, ok := f.state.Users[userID]; !ok {
+		return immich.ErrNotFound
+	}
+	for _, user := range a.Users {
+		if user.UserID == userID {
+			return nil
+		}
+	}
+	a.Users = append(append([]domain.AlbumUser(nil), a.Users...), domain.AlbumUser{UserID: userID, Role: "viewer"})
+	f.state.Albums[albumID] = a
+	return f.save()
 }
 func (f *Client) GetLibrary(_ context.Context, m domain.Member) (domain.Library, error) {
 	path := filepath.Join(f.config.ImmichBridgeRoot, "families", f.config.FamilyID, "users", m.ID, "assets")

@@ -36,7 +36,7 @@ func TestPinnedOpenAPISubset(t *testing.T) {
 	if spec.Info.Version != "3.2.2" {
 		t.Fatalf("spec version %s", spec.Info.Version)
 	}
-	for path, method := range map[string]string{"/users/me": "get", "/assets": "delete", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post", "/stacks": "get", "/stacks/{id}": "get"} {
+	for path, method := range map[string]string{"/users/me": "get", "/users": "get", "/assets": "delete", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/albums/{id}/users": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post", "/stacks": "get", "/stacks/{id}": "get"} {
 		if spec.Paths[path][method] == nil {
 			t.Fatalf("missing %s %s", method, path)
 		}
@@ -382,6 +382,7 @@ func TestReadOnlyClientAllowsSearchButBlocksWrites(t *testing.T) {
 			return err
 		},
 		func() error { return c.UpdateAlbum(context.Background(), m, "album", "name", "description", "") },
+		func() error { return c.AddAlbumUser(context.Background(), m, "album", "marker") },
 		func() error { return c.AddAssets(context.Background(), m, "album", []string{"asset"}) },
 		func() error { return c.RemoveAssets(context.Background(), m, "album", []string{"asset"}) },
 		func() error { return c.DeleteAssets(context.Background(), m, []string{"asset"}) },
@@ -395,5 +396,47 @@ func TestReadOnlyClientAllowsSearchButBlocksWrites(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("write reached Immich HTTP server: %d requests", requests)
+	}
+}
+
+func TestAlbumSharingUsesViewerAndPreservesParticipantRoles(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "member-key" {
+			t.Fatal("sharing used the wrong key")
+		}
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/albums/album/users":
+			var body struct {
+				Users []domain.AlbumUser `json:"albumUsers"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Users) != 1 || body.Users[0].UserID != "marker" || body.Users[0].Role != "viewer" {
+				t.Fatalf("invalid sharing body: %+v, %v", body, err)
+			}
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/albums":
+			if r.URL.Query().Get("isOwned") != "true" {
+				t.Fatal("discovery did not restrict to owned albums")
+			}
+			// Explicit roles establish ownership, even if a response is reordered.
+			_, _ = w.Write([]byte(`[{"id":"album","albumName":"Trip","albumUsers":[{"user":{"id":"marker"},"role":"viewer"},{"user":{"id":"owner"},"role":"owner"},{"user":{"id":"friend"},"role":"editor"}]}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/users":
+			_, _ = w.Write([]byte(`[{"id":"marker"}]`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL)
+		}
+	}))
+	defer server.Close()
+	c := New(server.URL + "/api")
+	m := domain.Member{Key: "member-key"}
+	if err := c.AddAlbumUser(context.Background(), m, "album", "marker"); err != nil {
+		t.Fatal(err)
+	}
+	albums, err := c.ListAlbums(context.Background(), m)
+	if err != nil || len(albums) != 1 || albums[0].OwnerID != "owner" || len(albums[0].Users) != 3 || albums[0].Users[0].Role != "viewer" || albums[0].Users[2].Role != "editor" {
+		t.Fatalf("lost participant identity/roles: %+v, %v", albums, err)
+	}
+	users, err := c.ListUsers(context.Background(), m)
+	if err != nil || len(users) != 1 || users[0].ID != "marker" {
+		t.Fatalf("users=%+v, err=%v", users, err)
 	}
 }

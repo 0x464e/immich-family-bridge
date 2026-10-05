@@ -12,6 +12,17 @@ family_id: my-family
 # Change this value to rename the managed albums on later active polls.
 together_album_name: Together
 
+# Optional dedicated Immich user whose album shares mark albums for mirroring.
+# Create a separate user (e.g. named "Together") and set its UUID here. Share an
+# owned album with that user using Immich's normal web/mobile Share dialog; the
+# next full discovery registers it automatically. This user is NOT a family
+# member and needs no API key or External Library. Leave empty to disable.
+# All registered member albums (including Together and existing/API registrations)
+# are also shared with this user as a viewer. Member keys additionally require
+# albumUser.create. Removing this viewer does not unregister an album: the bridge
+# restores the share on the next full discovery, without unsharing any media.
+together_user_id: ""
+
 # Immich API base URL as reached from the bridge container. Include the /api
 # suffix. A Compose service name works when both containers share a network.
 immich_url: http://immich-server:2283/api
@@ -114,7 +125,8 @@ members:
     # that the key belongs to user_id. Give it user.read, asset.read,
     # assetFile.read, album.create, album.read, album.update,
     # albumAsset.create, albumAsset.delete, and job.create permissions. Add
-    # asset.delete when remove_unshared_replicas is true. job.create refreshes
+    # albumUser.create when together_user_id is set, and asset.delete when
+    # remove_unshared_replicas is true. job.create refreshes
     # metadata after a linked XMP changes. Never put the key itself in this file.
     key_env: IMMICH_MEMBER_ALICE_KEY
   # Another member; use a different stable ID, user, library, and key variable.

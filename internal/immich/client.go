@@ -11,6 +11,7 @@ var ErrNotFound = errors.New("Immich resource not found")
 type Client interface {
 	Version(context.Context) (string, error)
 	Me(context.Context, domain.Member) (string, error)
+	ListUsers(context.Context, domain.Member) ([]domain.User, error)
 	Permissions(context.Context, domain.Member) ([]string, error)
 	GetLibrary(context.Context, domain.Member) (domain.Library, error)
 	GetAsset(context.Context, domain.Member, string) (domain.Asset, error)
@@ -18,6 +19,7 @@ type Client interface {
 	ListStacks(context.Context, domain.Member) ([]domain.Stack, error)
 	GetAlbum(context.Context, domain.Member, string) (domain.Album, error)
 	ListAlbums(context.Context, domain.Member) ([]domain.Album, error)
+	AddAlbumUser(context.Context, domain.Member, string, string) error
 	ListAlbumAssets(context.Context, domain.Member, string) ([]domain.Asset, error)
 	CreateAlbum(context.Context, domain.Member, string, string, string) (domain.Album, error)
 	UpdateAlbum(context.Context, domain.Member, string, string, string, string) error
