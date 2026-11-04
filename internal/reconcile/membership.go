@@ -18,6 +18,9 @@ type albumPlan struct {
 	origins                        map[string]domain.Asset
 	originMembers                  map[string]string
 	assetLogical                   map[string]string
+	ownerDeletes                   map[string]bool
+	ownerRestores                  map[string]bool
+	repairs                        map[string]domain.Replica
 }
 
 func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, preview bool) (*albumPlan, error) {
@@ -87,6 +90,9 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
+			if asset.IsTrashed {
+				continue
+			}
 			current[asset.ID] = true
 			lid, known := mappedAssets[asset.ID]
 			if !known {
@@ -149,22 +155,30 @@ func (r *Reconciler) observeAlbum(ctx context.Context, a domain.LogicalAlbum, pr
 				if current[old] {
 					continue
 				}
-				_, err := r.API.GetAsset(ctx, m, old)
-				if errors.Is(err, immich.ErrNotFound) {
-					if preview {
-						p.actions = append(p.actions, Action{Kind: "source_missing", MemberID: m.ID, ImmichAssetID: old})
-					} else {
-						r.Log.Warn("asset missing from Immich; keeping sharing reference", "member_id", m.ID, "immich_asset_id", old)
+				lid, known := mappedAssets[old]
+				if !known {
+					continue
+				}
+				asset, err := r.API.GetAsset(ctx, m, old)
+				if err != nil && !errors.Is(err, immich.ErrNotFound) {
+					return nil, fmt.Errorf("check missing album asset: %w", err)
+				}
+				// Deleting a recipient copy is never an unshare instruction.
+				// Audits restore trash or reimport a permanently missing copy.
+				if errors.Is(err, immich.ErrNotFound) || asset.IsTrashed {
+					rep, found, e := r.DB.Replica(lid, m.ID)
+					if e != nil {
+						return nil, e
+					}
+					if found && rep.Role == "external_replica" {
+						if p.repairs == nil {
+							p.repairs = map[string]domain.Replica{}
+						}
+						p.repairs[m.ID+"\x00"+lid] = rep
 					}
 					continue
 				}
-				if err != nil {
-					return nil, fmt.Errorf("check missing album asset: %w", err)
-				}
-				lid, known := mappedAssets[old]
-				if known {
-					p.removes[lid] = true
-				}
+				p.removes[lid] = true
 			}
 		}
 		p.observations = append(p.observations, o)
@@ -266,6 +280,21 @@ func (r *Reconciler) persistPlans(plans []*albumPlan) error {
 	}
 	defer tx.Rollback()
 	for _, p := range plans {
+		for _, rep := range p.repairs {
+			if _, err := tx.Exec("UPDATE asset_replicas SET state='repair_pending' WHERE logical_asset_id=? AND member_id=? AND role='external_replica'", rep.LogicalID, rep.MemberID); err != nil {
+				return err
+			}
+		}
+		for id := range p.ownerRestores {
+			if _, err := tx.Exec("UPDATE asset_replicas SET state='ready',error=NULL WHERE logical_asset_id=? AND role='origin'", id); err != nil {
+				return err
+			}
+		}
+		for id := range p.ownerDeletes {
+			if _, err := tx.Exec("UPDATE asset_replicas SET state='owner_deleted',error=NULL WHERE logical_asset_id=? AND role='origin'", id); err != nil {
+				return err
+			}
+		}
 		var cover any
 		if p.album.CoverID != "" {
 			cover = p.album.CoverID
@@ -335,12 +364,20 @@ func (r *Reconciler) previewPlans(ctx context.Context, albums []domain.LogicalAl
 		}
 	}
 	resolveTogether(plans)
+	if err := r.resolveOwnerDeletions(ctx, plans); err != nil {
+		return nil, err
+	}
 	actions := []Action{}
 	desiredAnywhere := map[string]bool{}
 	for _, p := range plans {
 		add := func(a Action) { a.AlbumID = p.album.ID; a.AlbumName = p.album.Name; actions = append(actions, a) }
 		for _, a := range p.actions {
 			add(a)
+		}
+		for _, rep := range p.repairs {
+			if p.desired[rep.LogicalID] {
+				add(Action{Kind: "restore_recipient_replica", MemberID: rep.MemberID, LogicalAssetID: rep.LogicalID, ImmichAssetID: rep.AssetID})
+			}
 		}
 		for id := range p.desired {
 			desiredAnywhere[id] = true
@@ -384,12 +421,26 @@ func (r *Reconciler) previewPlans(ctx context.Context, albums []domain.LogicalAl
 			}
 		}
 	}
-	if r.C.RemoveUnshared {
+	{
 		replicas, err := r.DB.Replicas()
 		if err != nil {
 			return nil, err
 		}
+		deleted := map[string]bool{}
+		for _, p := range plans {
+			for id := range p.ownerDeletes {
+				deleted[id] = true
+			}
+		}
 		for _, rep := range replicas {
+			if rep.Role == "origin" && rep.State == "owner_deleted" {
+				deleted[rep.LogicalID] = true
+			}
+		}
+		for _, rep := range replicas {
+			if !r.C.RemoveUnshared && !deleted[rep.LogicalID] {
+				continue
+			}
 			if rep.Role != "external_replica" || desiredAnywhere[rep.LogicalID] {
 				continue
 			}
@@ -415,4 +466,83 @@ func (r *Reconciler) previewPlans(ctx context.Context, albums []domain.LogicalAl
 		return false
 	})
 	return actions, nil
+}
+
+// Owner deletion overrides additions and removals in every mirrored album.
+// Inspect origins absent from their own observed albums, including older
+// source_missing records whose last observation has already been forgotten.
+func (r *Reconciler) resolveOwnerDeletions(ctx context.Context, plans []*albumPlan) error {
+	candidates, present := map[string]bool{}, map[string]bool{}
+	for _, p := range plans {
+		for id := range p.desired {
+			candidates[id] = true
+		}
+		for id := range p.before {
+			candidates[id] = true
+		}
+	}
+	reps, err := r.DB.Replicas()
+	if err != nil {
+		return err
+	}
+	origins := map[string]domain.Replica{}
+	for _, rep := range reps {
+		if rep.Role == "origin" {
+			origins[rep.LogicalID] = rep
+		}
+	}
+	for _, p := range plans {
+		for _, o := range p.observations {
+			for aid := range o.assets {
+				id := p.assetLogical[o.member.ID+"\x00"+aid]
+				if rep, ok := origins[id]; ok && rep.MemberID == o.member.ID && rep.AssetID == aid {
+					present[id] = true
+				}
+			}
+		}
+	}
+	deleted, restored := map[string]bool{}, map[string]bool{}
+	for id := range candidates {
+		rep, known := origins[id]
+		if !known {
+			continue
+		} // Newly discovered dry-run origin.
+		if rep.State == "owner_deleted" {
+			// Only an active origin appearing in its owner's album can reshare
+			// a previously deleted asset. A stale recipient cannot do so.
+			if present[id] {
+				restored[id] = true
+			} else {
+				deleted[id] = true
+			}
+			continue
+		}
+		if present[id] {
+			continue
+		}
+		member, ok := r.member(rep.MemberID)
+		if !ok {
+			return errors.New("origin member missing")
+		}
+		asset, err := r.API.GetAsset(ctx, member, rep.AssetID)
+		if err != nil && !errors.Is(err, immich.ErrNotFound) {
+			return fmt.Errorf("confirm owner deletion: %w", err)
+		}
+		if err == nil && asset.OwnerID != member.UserID {
+			return errors.New("origin owner mismatch")
+		}
+		if errors.Is(err, immich.ErrNotFound) || asset.IsTrashed {
+			deleted[id] = true
+		}
+	}
+	for _, p := range plans {
+		p.ownerDeletes = deleted
+		p.ownerRestores = restored
+		for id := range deleted {
+			delete(p.desired, id)
+			delete(p.adds, id)
+			p.removes[id] = true
+		}
+	}
+	return nil
 }

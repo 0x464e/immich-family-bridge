@@ -146,3 +146,36 @@ func TestRemoveOnlyExpectedHardlink(t *testing.T) {
 		t.Fatal("conflicting destination was removed:", err)
 	}
 }
+
+func TestRemoveRecordedAfterOriginalDeletion(t *testing.T) {
+	root := t.TempDir()
+	sourceRoot, bridgeRoot := filepath.Join(root, "source"), filepath.Join(root, "bridge")
+	if err := os.MkdirAll(sourceRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(bridgeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	source, dest := filepath.Join(sourceRoot, "a.jpg"), filepath.Join(bridgeRoot, "a.jpg")
+	if err := os.WriteFile(source, []byte("image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	l := Linker{SourceRoot: sourceRoot, BridgeRoot: bridgeRoot}
+	if err := l.Ensure(source, dest); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(source)
+	device, inode := Identity(info)
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.RemoveRecorded(source, dest, device, inode+1); !errors.Is(err, ErrConflict) {
+		t.Fatalf("different inode accepted: %v", err)
+	}
+	if err := l.RemoveRecorded(source, dest, device, inode); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.RemoveRecorded(source, dest, device, inode); err != nil {
+		t.Fatal("repeat removal", err)
+	}
+}

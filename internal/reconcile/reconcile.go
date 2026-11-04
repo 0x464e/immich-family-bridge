@@ -445,6 +445,9 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		plans = append(plans, plan)
 	}
 	resolveTogether(plans)
+	if err := r.resolveOwnerDeletions(ctx, plans); err != nil {
+		return err
+	}
 	if err := r.persistPlans(plans); err != nil {
 		return err
 	}
@@ -564,10 +567,8 @@ func (r *Reconciler) applyPlans(ctx context.Context, plans []*albumPlan, started
 	}
 	// Cleanup runs before MarkUnused so a newly removed sharing reference gets
 	// one full polling interval to be re-added before destructive work begins.
-	if r.C.RemoveUnshared {
-		if e := r.cleanupUnusedReplicas(ctx); e != nil {
-			errs = append(errs, e)
-		}
+	if e := r.cleanupUnusedReplicas(ctx); e != nil {
+		errs = append(errs, e)
 	}
 	if e := r.DB.MarkUnused(); e != nil {
 		errs = append(errs, e)
@@ -914,7 +915,7 @@ func (r *Reconciler) removeMirroredStack(ctx context.Context, source domain.Sour
 }
 
 func (r *Reconciler) cleanupUnusedReplicas(ctx context.Context) error {
-	replicas, err := r.DB.RemovalReplicas(removalBatchSize)
+	replicas, err := r.DB.RemovalReplicas(removalBatchSize, r.C.RemoveUnshared)
 	if err != nil {
 		return err
 	}
@@ -923,6 +924,7 @@ func (r *Reconciler) cleanupUnusedReplicas(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+
 		count, err := r.DB.SourceCount(replica.LogicalID)
 		if err != nil {
 			errs = append(errs, err)
@@ -1045,7 +1047,7 @@ func (r *Reconciler) removeReplicaFiles(ctx context.Context, replica domain.Repl
 	})
 	for _, kind := range kinds {
 		component := components[kind]
-		if err := r.FS.Remove(component.SourcePath, component.RecipientPath); err != nil {
+		if err := r.FS.RemoveRecorded(component.SourcePath, component.RecipientPath, component.SourceDevice, component.SourceInode); err != nil {
 			return fmt.Errorf("remove %s component: %w", kind, err)
 		}
 	}
@@ -1331,7 +1333,7 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 	if err != nil {
 		return current, err
 	}
-	wasReady := found && current.AssetID != "" && current.State == "ready"
+	wasReady := found && current.AssetID != "" && (current.State == "ready" || current.State == "repair_pending")
 	logical, err := r.DB.LogicalAsset(logicalID)
 	if err != nil {
 		return current, err
@@ -1352,6 +1354,9 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 			current.Error = e.Error()
 			_ = r.DB.UpsertReplica(current)
 			return current, e
+		}
+		if originAsset.IsTrashed {
+			return current, fmt.Errorf("owner asset trashed: %w", immich.ErrNotFound)
 		}
 		originAsset, e = r.mappedAsset(originAsset)
 		if e != nil || originAsset.OwnerID != m.UserID {
@@ -1399,6 +1404,9 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 		_ = r.DB.UpsertReplica(current)
 		return current, fmt.Errorf("source asset unavailable: %w", err)
 	}
+	if asset.IsTrashed {
+		return current, fmt.Errorf("owner asset trashed: %w", immich.ErrNotFound)
+	}
 	if asset.OwnerID != origin.UserID {
 		return current, errors.New("source owner changed")
 	}
@@ -1439,12 +1447,18 @@ func (r *Reconciler) ensureReplica(ctx context.Context, logicalID string, m doma
 			return current, errors.New("stored recipient asset identity mismatch")
 		}
 		if e == nil {
+			if remote.IsTrashed {
+				if err := r.API.RestoreAssets(ctx, m, []string{remote.ID}); err != nil {
+					return current, err
+				}
+			}
 			if e := r.ensureRecipientComponents(ctx, logicalID, m, current, asset, path, &remote); e != nil {
 				current.Error = e.Error()
 				_ = r.DB.UpsertReplica(current)
 				return current, e
 			}
-			if current.Error != "" {
+			if current.Error != "" || current.State != "ready" {
+				current.State = "ready"
 				current.Error = ""
 				if e := r.DB.UpsertReplica(current); e != nil {
 					return current, e
@@ -1515,6 +1529,8 @@ func (a Action) Message() string {
 		return "dry-run: would add member asset to album"
 	case "remove_album_asset":
 		return "dry-run: would remove member asset from album"
+	case "restore_recipient_replica":
+		return "dry-run: would restore a deleted recipient copy without changing sharing"
 	case "delete_recipient_replica":
 		return "dry-run: would delete unshared recipient asset and hardlinks"
 	case "update_album_metadata":
@@ -1570,12 +1586,9 @@ func (r *Reconciler) Check(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("member %s API key permissions: %w", m.ID, err)
 		}
-		required := []string{"stack.read", "stack.create", "stack.delete", "album.delete"}
+		required := []string{"stack.read", "stack.create", "stack.delete", "album.delete", "asset.delete"}
 		if r.C.TogetherUserID != "" {
 			required = append(required, "albumUser.create", "user.read")
-		}
-		if r.C.RemoveUnshared {
-			required = append(required, "asset.delete")
 		}
 		granted := map[string]bool{}
 		for _, permission := range permissions {
@@ -1631,7 +1644,8 @@ func (r *Reconciler) component(kind, source, recipient, state string) (domain.Me
 	if err != nil {
 		return domain.MediaComponent{}, err
 	}
-	return domain.MediaComponent{Kind: kind, SourcePath: source, RecipientPath: recipient, State: state, SourceSize: info.Size(), SourceMtimeNS: info.ModTime().UnixNano()}, nil
+	device, inode := filesystem.Identity(info)
+	return domain.MediaComponent{SourceDevice: device, SourceInode: inode, Kind: kind, SourcePath: source, RecipientPath: recipient, State: state, SourceSize: info.Size(), SourceMtimeNS: info.ModTime().UnixNano()}, nil
 }
 
 func (r *Reconciler) recordOriginComponents(logicalID, memberID string, asset domain.Asset) error {

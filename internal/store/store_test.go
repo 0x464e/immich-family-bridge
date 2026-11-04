@@ -54,7 +54,7 @@ func TestPersistenceAndMigrations(t *testing.T) {
 		t.Fatalf("mapping lost on restart: %+v %v", rep, e)
 	}
 	var version int
-	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 9 {
+	if e := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); e != nil || version != 10 {
 		t.Fatalf("migration version %d %v", version, e)
 	}
 	if _, e := s.DB.Exec(`INSERT INTO asset_replica_files(logical_asset_id,member_id,component_kind,source_path,recipient_path,state) VALUES(?,?,?,?,?,?)`, id, "b", "original", "/fixture/a.jpg", "/fixture/bridge/b.jpg", "ready"); e != nil {
@@ -208,5 +208,48 @@ func TestUpgradeExistingDatabasePreservesAlbums(t *testing.T) {
 	albums, err = store.Albums()
 	if err != nil || albums[0].SystemKey != "together" {
 		t.Fatalf("system key not persisted: %+v, %v", albums, err)
+	}
+}
+
+func TestOwnerDeletionCleanupIsNotBlockedByRetainedUnsharedReplicas(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "bridge.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Init("family", []domain.Member{{ID: "a", UserID: "ua", LibraryID: "la"}, {ID: "b", UserID: "ub", LibraryID: "lb"}}); err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{}
+	for _, asset := range []string{"one", "two"} {
+		id, err := s.EnsureOrigin("family", "a", domain.Asset{ID: asset, OwnerID: "ua", OriginalPath: "/source/" + asset + ".jpg"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpsertReplica(domain.Replica{LogicalID: id, MemberID: "b", Role: "external_replica", State: "pending_removal"}); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	// Keep the first sorted row as an ordinary unshare; only the later row is
+	// owner-deleted. Filter before LIMIT so retained rows cannot starve cleanup.
+	if ids[0] > ids[1] {
+		ids[0], ids[1] = ids[1], ids[0]
+	}
+	origin, _, err := s.Replica(ids[1], "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin.State = "owner_deleted"
+	if err := s.UpsertReplica(origin); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.RemovalReplicas(1, false)
+	if err != nil || len(pending) != 1 || pending[0].LogicalID != ids[1] {
+		t.Fatalf("owner deletion starved: %+v %v", pending, err)
+	}
+	all, err := s.RemovalReplicas(2, true)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("opt-in cleanup lost unshared replica: %+v %v", all, err)
 	}
 }

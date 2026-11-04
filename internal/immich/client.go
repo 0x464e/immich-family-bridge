@@ -27,6 +27,7 @@ type Client interface {
 	AddAssets(context.Context, domain.Member, string, []string) error
 	RemoveAssets(context.Context, domain.Member, string, []string) error
 	DeleteAssets(context.Context, domain.Member, []string) error
+	RestoreAssets(context.Context, domain.Member, []string) error
 	CreateStack(context.Context, domain.Member, []string) (domain.Stack, error)
 	DeleteStack(context.Context, domain.Member, string) error
 	ScanLibrary(context.Context, domain.Member) error

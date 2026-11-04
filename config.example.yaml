@@ -99,7 +99,7 @@ poll_interval: 30s
 # complete discovery immediately. The default is 5m when omitted.
 discovery_interval: 5m
 
-# Delete recipient replicas after removal from Together has removed all
+# Delete recipient replicas after album-only removal from Together has removed all
 # registered album references. The default is false when omitted: the bridge
 # removes album membership but retains the recipient Immich asset and hardlinks in the
 # pending_removal state. When true, cleanup waits one complete polling interval,
@@ -107,8 +107,10 @@ discovery_interval: 5m
 # library, and path, then force-deletes only that recipient asset through Immich.
 # On the following poll it removes any media and XMP hardlinks Immich left behind,
 # but only if each still has the same inode as its source. Originals are retained.
-# Enable this only after validating deletion with disposable media. Member API
-# keys then also require asset.delete permission.
+# Validate cleanup with disposable media. All member API keys require
+# asset.delete for owner-deletion propagation and recipient trash restoration.
+# Owner trash/permanent deletion always deletes recipient copies, independently
+# of this setting. Recipient deletion is repaired by restore or reimport.
 remove_unshared_replicas: false
 
 # Family members to synchronize; configure at least two. Give each person a
@@ -126,10 +128,10 @@ members:
     # Environment variable holding this user's Immich API key. The bridge checks
     # that the key belongs to user_id. Give it user.read, asset.read,
     # assetFile.read, album.create, album.read, album.update, album.delete,
-    # albumAsset.create, albumAsset.delete, and job.create permissions. Add
-    # albumUser.create when together_user_id is set, and asset.delete when
-    # remove_unshared_replicas is true. job.create refreshes
-    # metadata after a linked XMP changes. Never put the key itself in this file.
+    # albumAsset.create, albumAsset.delete, asset.delete, and job.create permissions.
+    # Add albumUser.create when together_user_id is set. asset.delete is always
+    # required for owner deletion propagation and recipient trash restoration.
+    # job.create refreshes metadata after a linked XMP changes. Never put the key itself in this file.
     key_env: IMMICH_MEMBER_ALICE_KEY
   # Another member; use a different stable ID, user, library, and key variable.
   - id: bob

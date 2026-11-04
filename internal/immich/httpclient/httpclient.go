@@ -194,10 +194,11 @@ type assetDTO struct {
 	LivePhotoVideoID *string         `json:"livePhotoVideoId"`
 	Stack            json.RawMessage `json:"stack"`
 	IsEdited         bool            `json:"isEdited"`
+	IsTrashed        bool            `json:"isTrashed"`
 }
 
 func (a assetDTO) domain() domain.Asset {
-	x := domain.Asset{ID: a.ID, OwnerID: a.OwnerID, OriginalPath: a.OriginalPath, OriginalFileName: a.OriginalFileName, Type: a.Type, Edited: a.IsEdited}
+	x := domain.Asset{ID: a.ID, OwnerID: a.OwnerID, OriginalPath: a.OriginalPath, OriginalFileName: a.OriginalFileName, Type: a.Type, Edited: a.IsEdited, IsTrashed: a.IsTrashed}
 	if a.LibraryID != nil {
 		x.LibraryID = *a.LibraryID
 	}
@@ -420,6 +421,11 @@ func (c *Client) changeAssets(ctx context.Context, m domain.Member, id string, a
 		return fmt.Errorf("Immich returned %d results for %d album assets", len(result), len(assets))
 	}
 	for _, item := range result {
+		// Restoring trash can restore its album membership after observation.
+		// Immich reports that idempotent addition as a duplicate.
+		if method == http.MethodPut && item.Error == "duplicate" {
+			continue
+		}
 		if !item.Success {
 			return fmt.Errorf("Immich album asset %s failed: %s", item.ID, item.Error)
 		}
@@ -457,4 +463,9 @@ func (c *Client) FindByPath(ctx context.Context, m domain.Member, path string) (
 		}
 	}
 	return out, nil
+}
+
+// RestoreAssets restores only the specified recipient assets, never the whole trash.
+func (c *Client) RestoreAssets(ctx context.Context, m domain.Member, ids []string) error {
+	return c.request(ctx, m.Key, http.MethodPost, "/trash/restore/assets", map[string]any{"ids": ids}, nil)
 }

@@ -915,38 +915,6 @@ func TestRemovalWaitsForAnInFlightImportBeforeDeleting(t *testing.T) {
 	}
 }
 
-func TestMissingSourceRetainsLinks(t *testing.T) {
-	_, db, api, r := setup(t)
-	ctx := context.Background()
-	album, e := r.Register(ctx, "alice", "trip")
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e := r.Run(ctx); e != nil {
-		t.Fatal(e)
-	}
-	lid, _, _ := db.FindReplicaAsset("alice", "a1")
-	rep, _, _ := db.Replica(lid, "bob")
-	if e := api.DeleteAsset("a1"); e != nil {
-		t.Fatal(e)
-	}
-	if e := r.Run(ctx); e != nil {
-		t.Fatal(e)
-	}
-	refs, _ := db.SourceCount(lid)
-	if refs != 1 {
-		t.Fatalf("source deletion revoked sharing: %d", refs)
-	}
-	rep, _, _ = db.Replica(lid, "bob")
-	if rep.State != "source_missing" {
-		t.Fatalf("missing source state: %+v", rep)
-	}
-	if _, e := os.Stat(rep.Path); e != nil {
-		t.Fatal("recipient link removed:", e)
-	}
-	_ = album
-}
-
 func TestOriginPathMoveRequiresSameInode(t *testing.T) {
 	c, db, api, r := setup(t)
 	ctx := context.Background()

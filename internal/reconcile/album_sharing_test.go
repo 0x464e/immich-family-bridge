@@ -224,7 +224,7 @@ func TestTogetherShareDryRunRegistersLocallyWithoutImmichWrites(t *testing.T) {
 func TestTogetherShareIsOptInAndChecksPermissionsAndUser(t *testing.T) {
 	_, db, api, r := setup(t)
 	ctx := context.Background()
-	r.API = restrictedClient{Client: api}
+	r.API = shareRestrictedClient{Client: api}
 	if err := r.Check(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -290,4 +290,10 @@ func TestActivePreviewDiscoveryDoesNotWriteAndExistingMarkerRoleIsPreserved(t *t
 	if err != nil || len(remote.Users) != 1 || remote.Users[0].Role != "editor" {
 		t.Fatalf("existing marker role overwritten: %+v, %v", remote, err)
 	}
+}
+
+type shareRestrictedClient struct{ immich.Client }
+
+func (shareRestrictedClient) Permissions(context.Context, domain.Member) ([]string, error) {
+	return []string{"asset.read", "asset.delete", "stack.read", "stack.create", "stack.delete", "album.delete"}, nil
 }

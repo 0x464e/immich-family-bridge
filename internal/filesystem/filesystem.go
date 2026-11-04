@@ -110,15 +110,24 @@ func (l Linker) Ensure(source, dest string) error {
 // Remove unlinks a bridge-managed destination only when it is still a hardlink
 // to the expected source. A destination already removed by Immich is success.
 func (l Linker) Remove(source, dest string) error {
+	return l.RemoveRecorded(source, dest, 0, 0)
+}
+
+// Identity is persisted while the source exists so deletion can safely unlink
+// a recipient even after Immich has removed the owner's original file.
+func Identity(info os.FileInfo) (uint64, uint64) {
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return uint64(stat.Dev), stat.Ino
+	}
+	return 0, 0
+}
+
+func (l Linker) RemoveRecorded(source, dest string, device, inode uint64) error {
 	if l.ReadOnly {
 		return ErrReadOnly
 	}
 	if !within(l.BridgeRoot, dest) {
 		return errors.New("unlink path outside configured root")
-	}
-	src, err := l.SourceInfo(source)
-	if err != nil {
-		return err
 	}
 	if err := noSymlink(filepath.Dir(dest)); err != nil {
 		return err
@@ -130,8 +139,21 @@ func (l Linker) Remove(source, dest string) error {
 	if err != nil {
 		return err
 	}
-	if !dst.Mode().IsRegular() || !os.SameFile(src, dst) {
+	if !dst.Mode().IsRegular() {
 		return ErrConflict
+	}
+	src, err := l.SourceInfo(source)
+	if err == nil {
+		if !os.SameFile(src, dst) {
+			return ErrConflict
+		}
+	} else if errors.Is(err, os.ErrNotExist) && inode != 0 {
+		actualDevice, actualInode := Identity(dst)
+		if device != actualDevice || inode != actualInode {
+			return ErrConflict
+		}
+	} else {
+		return err
 	}
 	return os.Remove(dest)
 }

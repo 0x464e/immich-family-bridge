@@ -666,3 +666,34 @@ func (f *Client) FindByPath(_ context.Context, m domain.Member, path string) ([]
 	}
 	return out, nil
 }
+
+func (f *Client) TrashAsset(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.state.Assets[id]
+	if !ok {
+		return immich.ErrNotFound
+	}
+	a.IsTrashed = true
+	f.state.Assets[id] = a
+	for _, membership := range f.state.Membership {
+		delete(membership, id)
+	}
+	return f.save()
+}
+func (f *Client) RestoreAssets(_ context.Context, m domain.Member, ids []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		a, ok := f.state.Assets[id]
+		if !ok || a.OwnerID != m.UserID {
+			return immich.ErrNotFound
+		}
+		a.IsTrashed = false
+		f.state.Assets[id] = a
+	}
+	return f.save()
+}

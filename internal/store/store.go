@@ -79,7 +79,7 @@ func (s *Store) Migrate() error {
 	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)`); err != nil {
 		return err
 	}
-	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql", "migrations/006_album_cover_observations.sql", "migrations/007_stacks.sql", "migrations/008_work_cursors.sql", "migrations/009_album_deletions.sql"}
+	files := []string{"migrations/001_init.sql", "migrations/002_components.sql", "migrations/003_system_albums.sql", "migrations/004_component_signatures.sql", "migrations/005_library_scan_state.sql", "migrations/006_album_cover_observations.sql", "migrations/007_stacks.sql", "migrations/008_work_cursors.sql", "migrations/009_album_deletions.sql", "migrations/010_component_identity.sql"}
 	var max int
 	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&max); err != nil {
 		return err
@@ -469,12 +469,12 @@ func (s *Store) UpsertReplica(r domain.Replica) error {
 }
 
 func (s *Store) UpsertReplicaFile(logicalID, memberID string, component domain.MediaComponent) error {
-	_, err := s.DB.Exec(`INSERT INTO asset_replica_files(logical_asset_id,member_id,component_kind,source_path,recipient_path,state,source_size,source_mtime_ns) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(logical_asset_id,member_id,component_kind) DO UPDATE SET source_path=excluded.source_path,recipient_path=excluded.recipient_path,state=excluded.state,source_size=excluded.source_size,source_mtime_ns=excluded.source_mtime_ns`, logicalID, memberID, component.Kind, component.SourcePath, component.RecipientPath, component.State, component.SourceSize, component.SourceMtimeNS)
+	_, err := s.DB.Exec(`INSERT INTO asset_replica_files(logical_asset_id,member_id,component_kind,source_path,recipient_path,state,source_size,source_mtime_ns,source_device,source_inode) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(logical_asset_id,member_id,component_kind) DO UPDATE SET source_path=excluded.source_path,recipient_path=excluded.recipient_path,state=excluded.state,source_size=excluded.source_size,source_mtime_ns=excluded.source_mtime_ns,source_device=excluded.source_device,source_inode=excluded.source_inode`, logicalID, memberID, component.Kind, component.SourcePath, component.RecipientPath, component.State, component.SourceSize, component.SourceMtimeNS, component.SourceDevice, component.SourceInode)
 	return err
 }
 
 func (s *Store) ReplicaFiles(logicalID, memberID string) (map[string]domain.MediaComponent, error) {
-	rows, err := s.DB.Query(`SELECT component_kind,source_path,recipient_path,state,source_size,source_mtime_ns FROM asset_replica_files WHERE logical_asset_id=? AND member_id=?`, logicalID, memberID)
+	rows, err := s.DB.Query(`SELECT component_kind,source_path,recipient_path,state,source_size,source_mtime_ns,source_device,source_inode FROM asset_replica_files WHERE logical_asset_id=? AND member_id=?`, logicalID, memberID)
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +482,7 @@ func (s *Store) ReplicaFiles(logicalID, memberID string) (map[string]domain.Medi
 	out := map[string]domain.MediaComponent{}
 	for rows.Next() {
 		var component domain.MediaComponent
-		if err := rows.Scan(&component.Kind, &component.SourcePath, &component.RecipientPath, &component.State, &component.SourceSize, &component.SourceMtimeNS); err != nil {
+		if err := rows.Scan(&component.Kind, &component.SourcePath, &component.RecipientPath, &component.State, &component.SourceSize, &component.SourceMtimeNS, &component.SourceDevice, &component.SourceInode); err != nil {
 			return nil, err
 		}
 		out[component.Kind] = component
@@ -664,8 +664,8 @@ func (s *Store) MarkUnused() error {
 	return err
 }
 
-func (s *Store) RemovalReplicas(limit int) ([]domain.Replica, error) {
-	rows, err := s.DB.Query(`SELECT logical_asset_id,member_id,COALESCE(immich_asset_id,''),role,COALESCE(filesystem_path,''),COALESCE(external_library_id,''),state,COALESCE(error,'') FROM asset_replicas WHERE role='external_replica' AND state IN ('pending_removal','deleting') ORDER BY logical_asset_id,member_id LIMIT ?`, limit)
+func (s *Store) RemovalReplicas(limit int, includeUnshared bool) ([]domain.Replica, error) {
+	rows, err := s.DB.Query(`SELECT logical_asset_id,member_id,COALESCE(immich_asset_id,''),role,COALESCE(filesystem_path,''),COALESCE(external_library_id,''),state,COALESCE(error,'') FROM asset_replicas WHERE role='external_replica' AND state IN ('pending_removal','deleting') AND (? OR EXISTS (SELECT 1 FROM asset_replicas origin WHERE origin.logical_asset_id=asset_replicas.logical_asset_id AND origin.role='origin' AND origin.state='owner_deleted')) ORDER BY logical_asset_id,member_id LIMIT ?`, includeUnshared, limit)
 	if err != nil {
 		return nil, err
 	}

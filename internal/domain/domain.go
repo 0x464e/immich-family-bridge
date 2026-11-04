@@ -20,6 +20,7 @@ type Asset struct {
 	OriginalPath     string `json:"originalPath"`
 	OriginalFileName string `json:"originalFileName"`
 	Type             string `json:"type"`
+	IsTrashed        bool   `json:"isTrashed"`
 	LivePhotoVideoID string `json:"livePhotoVideoId"`
 	StackID          string `json:"stackId,omitempty"`
 	StackPrimaryID   string `json:"stackPrimaryAssetId,omitempty"`
@@ -170,6 +171,8 @@ type MediaComponent struct {
 	State         string `json:"state"`
 	SourceSize    int64  `json:"sourceSize"`
 	SourceMtimeNS int64  `json:"sourceMtimeNs"`
+	SourceDevice  uint64 `json:"sourceDevice"`
+	SourceInode   uint64 `json:"sourceInode"`
 }
 
 type LogicalAlbum struct {

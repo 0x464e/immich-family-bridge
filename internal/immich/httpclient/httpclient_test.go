@@ -36,12 +36,12 @@ func TestPinnedOpenAPISubset(t *testing.T) {
 	if spec.Info.Version != "3.2.2" {
 		t.Fatalf("spec version %s", spec.Info.Version)
 	}
-	for path, method := range map[string]string{"/users/me": "get", "/users": "get", "/assets": "delete", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/albums/{id}/users": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post", "/stacks": "get", "/stacks/{id}": "get"} {
+	for path, method := range map[string]string{"/users/me": "get", "/users": "get", "/assets": "delete", "/trash/restore/assets": "post", "/assets/{id}": "get", "/asset-files": "get", "/assets/jobs": "post", "/search/metadata": "post", "/albums": "post", "/albums/{id}/assets": "put", "/albums/{id}/users": "put", "/libraries/{id}/scan": "post", "/jobs/{name}": "put", "/shared-links": "post", "/stacks": "get", "/stacks/{id}": "get"} {
 		if spec.Paths[path][method] == nil {
 			t.Fatalf("missing %s %s", method, path)
 		}
 	}
-	for _, field := range []string{"ownerId", "originalPath", "libraryId", "livePhotoVideoId"} {
+	for _, field := range []string{"ownerId", "originalPath", "libraryId", "livePhotoVideoId", "isTrashed"} {
 		if spec.Components.Schemas["AssetResponseDto"].Properties[field] == nil {
 			t.Fatalf("missing asset field %s", field)
 		}
@@ -475,5 +475,58 @@ func TestAlbumDeletionHTTPContractAndMissingAlbumConfirmation(t *testing.T) {
 	allowList = false
 	if _, err := c.GetAlbum(context.Background(), member, "id"); err == nil || errors.Is(err, immich.ErrNotFound) {
 		t.Fatal("unconfirmed absence treated as missing:", err)
+	}
+}
+
+func TestTrashStatusAndTargetedRestore(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/assets/trashed":
+			fmt.Fprint(w, `{"id":"trashed","ownerId":"owner","isTrashed":true,"type":"IMAGE"}`)
+		case "/asset-files":
+			fmt.Fprint(w, `[]`)
+		case "/trash/restore/assets":
+			if r.Method != "POST" {
+				t.Error("wrong restore method")
+			}
+			var body struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.IDs) != 1 || body.IDs[0] != "trashed" {
+				t.Errorf("restore body: %+v %v", body, err)
+			}
+			fmt.Fprint(w, `{"count":1}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	defer server.Close()
+	c := New(server.URL)
+	m := domain.Member{Key: "key"}
+	a, err := c.GetAsset(context.Background(), m, "trashed")
+	if err != nil || !a.IsTrashed {
+		t.Fatalf("trash status: %+v %v", a, err)
+	}
+	if err := c.RestoreAssets(context.Background(), m, []string{a.ID}); err != nil {
+		t.Fatal(err)
+	}
+	c.ReadOnly = true
+	if err := c.RestoreAssets(context.Background(), m, []string{a.ID}); err == nil {
+		t.Fatal("dry run restored trash")
+	}
+}
+
+func TestAddingRestoredAlbumMembershipIsIdempotent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[{"id":"asset","success":false,"error":"duplicate"}]`)
+	}))
+	defer server.Close()
+	c := New(server.URL)
+	if err := c.AddAssets(context.Background(), domain.Member{}, "album", []string{"asset"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RemoveAssets(context.Background(), domain.Member{}, "album", []string{"asset"}); err == nil {
+		t.Fatal("unexpected removal error ignored")
 	}
 }

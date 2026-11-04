@@ -188,3 +188,48 @@ verification warning; the subsequent ready-state, exact-membership, and hardlink
 checks passed. Missing-asset restoration logged its expected warning. These
 tests validate the tested album lifecycle, not arbitrary concurrent Immich edits
 or every server/storage failure. Production was not accessed or changed.
+
+## Owner and recipient asset deletion (2026-11-04)
+
+The disposable localhost stack was upgraded from Immich 3.2.2 to the latest
+stable release, 3.3.5, before testing. The test `.env` pins `v3.3.5`; the Valkey
+digest was updated to match that release's Compose file. Test-account identities,
+the server's disposable upload mount, and the bridge's disposable media/state
+mounts were checked before writes. No production instance was used.
+
+`scripts/test-asset-deletions.py` generated four unique synthetic uploads owned
+by User 1, associated XMP sidecars with two of them, and mirrored the assets to
+Admin and User 2. With the bridge stopped, User 2 trashed one recipient and
+permanently deleted another. After restart, the trashed copy was restored with
+its original Immich ID; the permanently deleted copy was reimported with a new
+ID. All mirror memberships, media hardlinks, and XMP associations matched the
+expected owner/library/path. Owner assets were unchanged. Immich restores album
+membership along with trash, so the adapter now accepts its duplicate-add result
+as an idempotent success; the final build had no reconciliation errors for this.
+
+With the bridge stopped again, User 1 trashed a third original and permanently
+deleted the fourth. The test waited until the permanently deleted original and
+its XMP were physically gone before restarting the bridge. Owner-deletion
+intent reached SQLite, and the bridge was restarted again before completion.
+Both recipients' assets, mappings, media links, and sidecar links were removed.
+The owner's trashed asset stayed trashed, the two surviving fixtures remained
+shared, another restart did not resurrect deleted assets, and SQLite's integrity
+check returned `ok`. Fixtures remain available in the disposable instance.
+
+Regression tests cover owner deletion with album-only cleanup enabled and
+disabled, both recipient deletion types, targeted restore failure/retry,
+read failures, dry-run preservation, deliberate owner restoration/re-sharing,
+restart with reopened SQLite, recorded-inode cleanup after source removal,
+and refusing a mismatching recipient inode. Owner-deletion cleanup is filtered
+before its batch limit so retained album-only unshares cannot starve it.
+
+The migration adds device/inode fields to component records. Newly prepared or
+audited components record that identity. A legacy component whose source has
+already disappeared and whose identity was never recorded remains a visible
+cleanup error rather than permitting an unverifiable unlink.
+
+The full Go suite, `go vet ./...`, and `goreleaser check` passed. The full
+race-enabled suite passed in a disposable Go 1.25 Alpine container with GCC
+(the host has CGO disabled and no C compiler). Both existing guarded live
+scripts, `test-album-sharing.py` and `test-album-unmirroring.py`, also passed
+against 3.3.5. The upgraded test stack and rebuilt dev bridge remain running.
