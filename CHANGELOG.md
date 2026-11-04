@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/0x464e/immich-family-bridge/compare/v0.4.0...v0.4.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* propagate owner asset deletions and restore recipient copies ([ac4e672](https://github.com/0x464e/immich-family-bridge/commit/ac4e672376dd64f07a14a352142fcd5f77a9c984))
+
 ## [0.4.0](https://github.com/0x464e/immich-family-bridge/compare/v0.3.1...v0.4.0) (2026-10-05)
 
 
